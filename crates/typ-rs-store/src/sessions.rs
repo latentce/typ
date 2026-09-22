@@ -1,6 +1,8 @@
 //! Session rows and their input events.
 
 use std::fmt;
+use std::num::ParseIntError;
+use std::str::FromStr;
 
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 use typ_rs_core::corpus::CORPUS_VERSION;
@@ -18,6 +20,14 @@ pub struct SessionId(i64);
 impl fmt::Display for SessionId {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         self.0.fmt(f)
+    }
+}
+
+impl FromStr for SessionId {
+    type Err = ParseIntError;
+
+    fn from_str(s: &str) -> std::result::Result<SessionId, ParseIntError> {
+        s.parse().map(SessionId)
     }
 }
 

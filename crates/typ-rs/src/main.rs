@@ -1,6 +1,7 @@
 mod input;
 mod interactive;
 mod render;
+mod report;
 mod terminal;
 
 use std::error::Error;
@@ -10,12 +11,12 @@ use std::process::ExitCode;
 use std::sync::LazyLock;
 
 use clap::{Parser, Subcommand};
+use typ_rs_core::analysis::analyze;
 use typ_rs_core::compose;
 use typ_rs_core::corpus::{CORPUS_VERSION, Corpus};
 use typ_rs_core::display::Palette;
-use typ_rs_core::metrics::{final_accuracy, gross_wpm};
-use typ_rs_core::session::{EndCondition, Outcome, SessionState};
-use typ_rs_store::{DEFAULT_PROFILE, SessionStart, Store, StoredSession, unix_now};
+use typ_rs_core::session::{EndCondition, SEMANTICS_VERSION};
+use typ_rs_store::{DEFAULT_PROFILE, SessionId, SessionStart, Store, unix_now};
 
 const PROMPT_WORDS: usize = 50;
 
@@ -50,6 +51,12 @@ struct Cli {
 enum Command {
     /// List recent completed sessions
     Stats,
+    /// Show how a stored session was interpreted: every word's first
+    /// attempt and attributed errors, and every interval's classification
+    Replay {
+        /// The session id, as listed by `typ stats`
+        session_id: SessionId,
+    },
 }
 
 fn main() -> ExitCode {
@@ -57,6 +64,7 @@ fn main() -> ExitCode {
     let outcome = match cli.command {
         None => session(),
         Some(Command::Stats) => stats(),
+        Some(Command::Replay { session_id }) => replay(session_id),
     };
     match outcome {
         Ok(()) => ExitCode::SUCCESS,
@@ -92,7 +100,8 @@ fn session() -> Result<(), Box<dyn Error>> {
 
     // Save before printing, but compute the results first so that a
     // persistence failure still shows them, followed by the error.
-    let results = results(&run.state);
+    let analysis = analyze(&run.state);
+    let results = report::results(&run.state, &analysis.metrics);
     let next = compose::frequency_weighted(corpus, PROMPT_WORDS, seed);
     let saved = store.finish_session(started.id, &run.state, next, unix_now());
     println!("{results}");
@@ -107,7 +116,26 @@ fn stats() -> Result<(), Box<dyn Error>> {
     let store = open_store()?;
     let profile = store.profile(DEFAULT_PROFILE)?;
     let sessions = store.completed_sessions(&profile, LISTED_SESSIONS)?;
-    print!("{}", session_listing(&sessions));
+    print!("{}", report::session_listing(&sessions));
+    Ok(())
+}
+
+/// Runs a stored session's events through the current analysis. The events
+/// are applied under the current editing rules, so a session recorded under
+/// older ones is flagged: its interpretation may differ from what the user
+/// saw.
+fn replay(session_id: SessionId) -> Result<(), Box<dyn Error>> {
+    let store = open_store()?;
+    let session = store.session(session_id)?;
+    if session.semantics_version != SEMANTICS_VERSION {
+        eprintln!(
+            "typ: session {session_id} was recorded under editing rules version {}; replaying under version {SEMANTICS_VERSION}",
+            session.semantics_version
+        );
+    }
+    let state = session.replay();
+    let analysis = analyze(&state);
+    print!("{}", report::replay(&session, &state, &analysis));
     Ok(())
 }
 
@@ -145,44 +173,6 @@ fn data_dir() -> Result<PathBuf, String> {
         .ok_or_else(|| "could not determine the data directory; set TYP_DATA_DIR".to_string())
 }
 
-/// The line printed when a session ends. Speed is reported only for a
-/// completed session: a partial prompt has no meaningful WPM.
-fn results(state: &SessionState) -> String {
-    match state.outcome() {
-        Some(Outcome::Completed) => {
-            let wpm = gross_wpm(state).unwrap_or(0.0);
-            let accuracy = 100.0 * final_accuracy(state);
-            format!("{wpm:.0} wpm  {accuracy:.1}% accuracy")
-        }
-        _ => {
-            let words = state.words_completed();
-            let noun = if words == 1 { "word" } else { "words" };
-            format!("interrupted after {words} {noun}")
-        }
-    }
-}
-
-/// One line per completed session, most recent first, with the same figures
-/// the session printed when it ended.
-fn session_listing(sessions: &[StoredSession]) -> String {
-    if sessions.is_empty() {
-        return "no completed sessions yet\n".to_string();
-    }
-    sessions
-        .iter()
-        .map(|session| {
-            let state = session.replay();
-            let wpm = gross_wpm(&state).unwrap_or(0.0);
-            let accuracy = 100.0 * final_accuracy(&state);
-            format!(
-                "{}  {:>3} words  {wpm:>3.0} wpm  {accuracy:>5.1}% accuracy\n",
-                session.started_at_local,
-                session.prompt.word_count()
-            )
-        })
-        .collect()
-}
-
 fn render_diagnostics(render_micros: &[u64]) -> String {
     let batches = render_micros.len();
     let total: u64 = render_micros.iter().sum();
@@ -198,49 +188,6 @@ fn render_diagnostics(render_micros: &[u64]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use typ_rs_core::prompt::Prompt;
-    use typ_rs_core::session::{Input, Key};
-
-    fn run(prompt: &str, script: &str) -> SessionState {
-        let mut state = SessionState::new(
-            Prompt::new(prompt.split(' ')),
-            EndCondition::AfterWords(usize::MAX),
-        );
-        for (i, c) in script.chars().enumerate() {
-            let key = if c == '⎋' {
-                Key::Interrupt
-            } else {
-                Key::Char(c)
-            };
-            // One keystroke every 100 ms.
-            state.apply_event(Input::new(i as u64 * 100_000, key));
-        }
-        state
-    }
-
-    #[test]
-    fn a_completed_session_reports_gross_wpm_and_final_accuracy() {
-        // 6 final characters ("cat dg") over 0.6 s is 120 wpm; "dg" for
-        // "dog" leaves 4 of 6 target characters correct.
-        let state = run("cat dog", "cat dg ");
-        assert_eq!(results(&state), "120 wpm  66.7% accuracy");
-    }
-
-    #[test]
-    fn an_interrupted_session_reports_words_completed_and_no_speed() {
-        assert_eq!(
-            results(&run("cat dog fox", "cat do⎋")),
-            "interrupted after 1 word"
-        );
-        assert_eq!(
-            results(&run("cat dog fox", "cat dog ⎋")),
-            "interrupted after 2 words"
-        );
-        assert_eq!(
-            results(&run("cat dog fox", "⎋")),
-            "interrupted after 0 words"
-        );
-    }
 
     #[test]
     fn render_diagnostics_summarise_the_batches() {

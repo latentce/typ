@@ -9,7 +9,7 @@ mod event;
 
 pub use event::{EventFlags, EventKind, Input, InputEvent, Key, LONG_PAUSE_MICROS};
 
-use crate::prompt::Prompt;
+use crate::prompt::{Prompt, Slot};
 
 /// Identifies the editing rules in this module. Bump whenever a rule changes
 /// so stored sessions can tell which rules their events were captured under.
@@ -181,11 +181,10 @@ impl SessionState {
     /// at the caret's position, or the word's following space once the word
     /// is fully typed.
     pub fn expected(&self) -> char {
-        self.prompt
-            .word(self.current_word)
-            .chars()
-            .nth(self.position())
-            .unwrap_or(' ')
+        self.prompt.expected_at(Slot {
+            word: self.current_word,
+            position: self.position(),
+        })
     }
 
     /// Applies one input: records it if it is an event, updates the typed

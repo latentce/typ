@@ -10,16 +10,20 @@ Everything is local: no account, no server, no telemetry.
 ## Status
 
 Early. `typ` runs one 50-word session: the prompt appears inline below the
-command, you type it, and it reports gross WPM and final accuracy. Every
-session is saved, including interrupted ones, and the prompt for your next
-session is composed as soon as the current one ends. `typ stats` lists your
-recent completed sessions. Statistics and the scheduler are being built on
-top of this.
+command, you type it, and it reports gross WPM, raw (first-attempt) accuracy,
+final accuracy, and consistency. Every session is saved, including
+interrupted ones, and the prompt for your next session is composed as soon as
+the current one ends. `typ stats` lists your recent completed sessions with
+their ids; `typ replay <id>` shows how a stored session was interpreted: each
+word's first attempt and the patterns its errors count against, and which
+keystroke intervals count as clean motor evidence. Statistics and the
+scheduler are being built on top of this.
 
 ```
 $ typ --version
 $ typ
 $ typ stats
+$ typ replay 12
 ```
 
 Set `NO_COLOR` to get bold and underline instead of colour. `Ctrl-C` or `Esc`

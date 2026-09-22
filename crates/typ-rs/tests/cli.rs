@@ -37,6 +37,7 @@ fn typ(args: &[&str]) -> Run {
 /// Types `script` against `prompt`, one key per 100 ms, and stores the
 /// session as started at `started_at`. Whatever prompt is waiting is
 /// replaced by `prompt` again, so every session in a test types `prompt`.
+/// `⌫` is backspace and `⎋` an interrupt.
 fn store_session(store: &mut Store, started_at: i64, prompt: &str, script: &str) {
     let profile = store.profile(DEFAULT_PROFILE).unwrap();
     let words = || Prompt::new(prompt.split(' '));
@@ -56,10 +57,10 @@ fn store_session(store: &mut Store, started_at: i64, prompt: &str, script: &str)
         EndCondition::AfterWords(started.prompt.word_count()),
     );
     for (i, c) in script.chars().enumerate() {
-        let key = if c == '⎋' {
-            Key::Interrupt
-        } else {
-            Key::Char(c)
+        let key = match c {
+            '⎋' => Key::Interrupt,
+            '⌫' => Key::Backspace,
+            c => Key::Char(c),
         };
         state.apply_event(Input::new(i as u64 * 100_000, key));
     }
@@ -132,7 +133,73 @@ fn stats_lists_completed_sessions_most_recent_first_and_skips_interrupted_ones()
     assert!(run.ok, "{}", run.stderr);
     assert_eq!(
         run.stdout,
-        "2024-01-16 08:00    2 words  140 wpm  100.0% accuracy\n\
-         2024-01-15 10:30    2 words  120 wpm   66.7% accuracy\n"
+        "   2  2024-01-16 08:00    2 words  140 wpm  100.0% accuracy\n\
+         \x20  1  2024-01-15 10:30    2 words  120 wpm   66.7% accuracy\n"
     );
+}
+
+#[test]
+fn replay_shows_how_every_word_and_interval_of_a_stored_session_was_interpreted() {
+    let dir = tempfile::tempdir().unwrap();
+    {
+        let mut store = Store::open(&dir.path().join("typ.db")).unwrap();
+        store_session(&mut store, 1_705_314_600, "cat dog", "cxt⌫⌫at dog");
+    }
+
+    let run = typ_in(dir.path(), &["replay", "1"]);
+    assert!(run.ok, "{}", run.stderr);
+    assert_eq!(run.stderr, "");
+    assert_eq!(
+        run.stdout,
+        "session 1  2024-01-15 10:30  completed  2 words\n\
+         84 wpm  83.3% raw  100.0% final  100% consistency\n\
+         4 corrections  0 uncorrected  error latency 300 ms  5 clean intervals\n\
+         \n\
+         words\n\
+         \x20 0 cat  first attempt \"cxt\"  history \"cxtat\"\n\
+         \x20     substitution x at 1 → \" ca\"\n\
+         \x20 1 dog  first attempt \"dog\"\n\
+         \n\
+         intervals\n\
+         \x20seq       at  latency  slot  key  class\n\
+         \x20  0        0        -   0:0  c    excluded: first_of_session\n\
+         \x20  1      100      100   0:1  x    clean\n\
+         \x20  2      200      100   0:2  t    clean\n\
+         \x20  3      300      100   0:3  ⌫    excluded: backspace\n\
+         \x20  4      400      100   0:2  ⌫    excluded: backspace, after_correction\n\
+         \x20  5      500      100   0:1  a    excluded: replacement, after_correction\n\
+         \x20  6      600      100   0:2  t    excluded: replacement, after_correction\n\
+         \x20  7      700      100   0:3  ␣    excluded: after_correction\n\
+         \x20  8      800      100   1:0  d    clean\n\
+         \x20  9      900      100   1:1  o    clean\n\
+         \x20 10     1000      100   1:2  g    clean\n"
+    );
+}
+
+#[test]
+fn replay_of_an_interrupted_session_marks_the_unsubmitted_word_and_shows_no_speed() {
+    let dir = tempfile::tempdir().unwrap();
+    {
+        let mut store = Store::open(&dir.path().join("typ.db")).unwrap();
+        store_session(&mut store, 1_705_314_600, "cat dog fox", "cat do⎋");
+    }
+
+    let run = typ_in(dir.path(), &["replay", "1"]);
+    assert!(run.ok, "{}", run.stderr);
+    let lines: Vec<&str> = run.stdout.lines().collect();
+    assert_eq!(
+        lines[0],
+        "session 1  2024-01-15 10:30  interrupted  3 words"
+    );
+    assert_eq!(lines[1], "interrupted after 1 word");
+    assert_eq!(lines[6], "  1 dog  first attempt \"do\"  (not submitted)");
+    assert!(!run.stdout.contains("fox"), "{}", run.stdout);
+}
+
+#[test]
+fn replay_of_an_unknown_session_fails_with_one_line() {
+    let run = typ(&["replay", "7"]);
+    assert!(!run.ok);
+    assert_eq!(run.stdout, "");
+    assert_eq!(run.stderr, "typ: no session 7\n");
 }

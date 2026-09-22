@@ -28,9 +28,9 @@ apart from your own history.
 4. **Paste.** Paste a few words. Nothing is typed and the caret does not
    move.
 5. **Complete.** Type the prompt to the end. On the final character (or a
-   space after the final word) a line with gross WPM and final accuracy
-   appears below the prompt and the shell prompt returns. The whole prompt
-   and the results stay in scrollback.
+   space after the final word) a line with gross WPM, raw accuracy, final
+   accuracy, and consistency appears below the prompt and the shell prompt
+   returns. The whole prompt and the results stay in scrollback.
 6. **`Ctrl-C`.** `just run`, type a word or two, press `Ctrl-C`. The session
    ends with `interrupted after N words` and the shell is back.
 7. **`Esc`.** Same as the previous step with `Esc`.
@@ -50,6 +50,12 @@ apart from your own history.
     `TYP_DATA_DIR`). The listing shows the sessions completed above, most
     recent first, and neither command disturbs the other. Finish or
     interrupt the session: the next `just run` shows a different prompt.
+13. **Replay.** `just run replay N` with an id from the listing. The first
+    lines repeat the results the session printed; below them every word
+    shows its first attempt and the errors attributed to patterns, and every
+    keystroke its interval class. The corrections you typed in step 2 show
+    as `excluded: backspace` / `replacement`, the resize as `after_resize`,
+    the paste as `in_paste`, and any long pause as a hesitation.
 
 Setting `TYP_DIAGNOSTICS=1` prints the render timing per input batch (count,
 mean, max) to stderr after the results, for checking that painting stays well
