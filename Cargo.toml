@@ -1,0 +1,20 @@
+[workspace]
+resolver = "3"
+members = ["crates/typ-rs-core", "crates/typ-rs-store", "crates/typ-rs", "crates/typ-sim"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+rust-version = "1.85"
+readme = "README.md"
+keywords = ["typing", "trainer", "terminal", "practice", "cli"]
+categories = ["command-line-utilities"]
+
+[workspace.dependencies]
+typ-rs-core = { path = "crates/typ-rs-core", version = "0.1.0" }
+typ-rs-store = { path = "crates/typ-rs-store", version = "0.1.0" }
+rand_core = "0.10"
+rand_chacha = "0.10"
+getrandom = "0.4"
+clap = { version = "4", features = ["derive"] }

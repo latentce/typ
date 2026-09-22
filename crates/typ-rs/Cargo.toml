@@ -1,0 +1,19 @@
+[package]
+name = "typ-rs"
+description = "A local terminal typing trainer that targets the character patterns you are weak on"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+readme.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
+[[bin]]
+name = "typ"
+path = "src/main.rs"
+
+[dependencies]
+typ-rs-core = { workspace = true }
+clap = { workspace = true }
+getrandom = { workspace = true }

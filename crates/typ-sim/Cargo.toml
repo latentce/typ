@@ -1,0 +1,15 @@
+[package]
+name = "typ-sim"
+description = "Simulator that drives typ's session pipeline with synthetic learners"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish = false
+
+[[bin]]
+name = "typ-sim"
+path = "src/main.rs"
+
+[dependencies]
+typ-rs-core = { workspace = true }

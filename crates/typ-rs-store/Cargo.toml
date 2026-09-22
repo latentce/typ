@@ -1,0 +1,13 @@
+[package]
+name = "typ-rs-store"
+description = "SQLite persistence, migrations, and rebuild for typ"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+readme.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
+[dependencies]
+typ-rs-core = { workspace = true }
