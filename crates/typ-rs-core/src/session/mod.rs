@@ -38,6 +38,25 @@ pub enum Outcome {
     Interrupted,
 }
 
+impl Outcome {
+    /// The outcome's stable name, as stored with the session. Never renamed.
+    pub fn name(self) -> &'static str {
+        match self {
+            Outcome::Completed => "completed",
+            Outcome::Interrupted => "interrupted",
+        }
+    }
+
+    /// The outcome with the given stored name, if this version knows it.
+    pub fn from_name(name: &str) -> Option<Outcome> {
+        match name {
+            "completed" => Some(Outcome::Completed),
+            "interrupted" => Some(Outcome::Interrupted),
+            _ => None,
+        }
+    }
+}
+
 /// What one input did, for the renderer. The analysis never reads effects; it
 /// works from the finished state and the event log.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -91,6 +110,21 @@ impl SessionState {
 
     pub fn prompt(&self) -> &Prompt {
         &self.prompt
+    }
+
+    /// Rebuilds the state a stored event log left behind by applying every
+    /// event again in order. The same prompt and events always produce the
+    /// same state, so the result is identical to the one recorded live.
+    pub fn replay<'a>(
+        prompt: Prompt,
+        end: EndCondition,
+        events: impl IntoIterator<Item = &'a InputEvent>,
+    ) -> SessionState {
+        let mut state = SessionState::new(prompt, end);
+        for event in events {
+            state.apply_event(event.input());
+        }
+        state
     }
 
     /// How many words of the prompt the session covers.

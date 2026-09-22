@@ -1,5 +1,6 @@
 //! Core of `typ`: everything that does not touch a terminal or a database.
 
+pub mod compose;
 pub mod corpus;
 pub mod display;
 pub mod metrics;

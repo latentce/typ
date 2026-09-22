@@ -9,18 +9,25 @@ Everything is local: no account, no server, no telemetry.
 
 ## Status
 
-Early. `typ` currently runs one 50-word session: the prompt appears inline
-below the command, you type it, and it reports gross WPM and final accuracy.
-Nothing is saved yet; statistics and the scheduler are being built on top of
-it.
+Early. `typ` runs one 50-word session: the prompt appears inline below the
+command, you type it, and it reports gross WPM and final accuracy. Every
+session is saved, including interrupted ones, and the prompt for your next
+session is composed as soon as the current one ends. `typ stats` lists your
+recent completed sessions. Statistics and the scheduler are being built on
+top of this.
 
 ```
 $ typ --version
 $ typ
+$ typ stats
 ```
 
 Set `NO_COLOR` to get bold and underline instead of colour. `Ctrl-C` or `Esc`
 ends a session early.
+
+Data lives in a single SQLite file under your platform's data directory:
+`~/.local/share/typ/typ.db` on Linux, `~/Library/Application Support/typ/` on
+macOS, `%APPDATA%\typ\` on Windows. Nothing leaves your machine.
 
 ## Installing
 
@@ -49,7 +56,9 @@ Without it, the equivalents are `cargo build -p typ-rs && ./target/debug/typ`,
 `cargo test --workspace`, and so on.
 
 The terminal loop itself is checked by hand; see
-[`docs/smoke-test.md`](docs/smoke-test.md).
+[`docs/smoke-test.md`](docs/smoke-test.md). Set `TYP_DATA_DIR` to point a run
+at a different database directory, so that experiments do not touch your own
+history.
 
 The workspace has four crates:
 

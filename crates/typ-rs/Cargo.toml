@@ -15,6 +15,11 @@ path = "src/main.rs"
 
 [dependencies]
 typ-rs-core = { workspace = true }
+typ-rs-store = { workspace = true }
 clap = { workspace = true }
 crossterm = { workspace = true }
+dirs = { workspace = true }
 getrandom = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }

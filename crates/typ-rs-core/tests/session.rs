@@ -513,6 +513,46 @@ fn arbitrary_event_logs_never_panic_and_keep_the_caret_inside_the_current_word()
 }
 
 #[test]
+fn a_stored_event_log_replays_to_the_identical_state() {
+    for seed in 0..50 {
+        let original = replay(&random_log(seed));
+        let replayed = SessionState::replay(
+            original.prompt().clone(),
+            EndCondition::AfterWords(original.word_count()),
+            original.events(),
+        );
+        assert_eq!(replayed, original, "seed {seed}");
+    }
+}
+
+#[test]
+fn event_kinds_have_stable_names_that_round_trip() {
+    for (kind, name) in [
+        (EventKind::Char, "char"),
+        (EventKind::Backspace, "backspace"),
+        (EventKind::Space, "space"),
+        (EventKind::Resize, "resize"),
+        (EventKind::Interrupt, "interrupt"),
+    ] {
+        assert_eq!(kind.name(), name);
+        assert_eq!(EventKind::from_name(name), Some(kind));
+    }
+    assert_eq!(EventKind::from_name("keystroke"), None);
+}
+
+#[test]
+fn outcomes_have_stable_names_that_round_trip() {
+    for (outcome, name) in [
+        (Outcome::Completed, "completed"),
+        (Outcome::Interrupted, "interrupted"),
+    ] {
+        assert_eq!(outcome.name(), name);
+        assert_eq!(Outcome::from_name(name), Some(outcome));
+    }
+    assert_eq!(Outcome::from_name("abandoned"), None);
+}
+
+#[test]
 fn semantics_version_is_declared() {
     const { assert!(SEMANTICS_VERSION >= 1) };
 }

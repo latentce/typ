@@ -11,3 +11,7 @@ categories.workspace = true
 
 [dependencies]
 typ-rs-core = { workspace = true }
+rusqlite = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }

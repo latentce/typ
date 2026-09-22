@@ -7,7 +7,9 @@ typed text echoed, Enter runs commands. If a step leaves the terminal broken,
 `reset` recovers it; the bug is in the guard.
 
 Build first with `just build` (or `cargo build -p typ-rs`); the commands below
-use `just run`, which runs the debug binary.
+use `just run`, which runs the debug binary. Export
+`TYP_DATA_DIR=/tmp/typ-smoke` first so the sessions typed here are kept
+apart from your own history.
 
 1. **Start.** `just run`. The prompt appears in muted gray directly below the
    command with a reverse-video caret on its first character. There is no
@@ -43,6 +45,11 @@ use `just run`, which runs the debug binary.
     the terminal.
 11. **Not a terminal.** `just run < /dev/null` refuses with a one-line
     message.
+12. **Stats during a session.** `just run` in one terminal and, while it is
+    waiting for input, `just run stats` in another (with the same
+    `TYP_DATA_DIR`). The listing shows the sessions completed above, most
+    recent first, and neither command disturbs the other. Finish or
+    interrupt the session: the next `just run` shows a different prompt.
 
 Setting `TYP_DIAGNOSTICS=1` prints the render timing per input batch (count,
 mean, max) to stderr after the results, for checking that painting stays well

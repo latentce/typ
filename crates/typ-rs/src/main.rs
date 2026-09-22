@@ -3,21 +3,29 @@ mod interactive;
 mod render;
 mod terminal;
 
+use std::error::Error;
 use std::io::IsTerminal;
+use std::path::PathBuf;
 use std::process::ExitCode;
 use std::sync::LazyLock;
 
-use clap::Parser;
-use typ_rs_core::corpus::{CORPUS_VERSION, Corpus, ReferenceDistribution};
+use clap::{Parser, Subcommand};
+use typ_rs_core::compose;
+use typ_rs_core::corpus::{CORPUS_VERSION, Corpus};
 use typ_rs_core::display::Palette;
 use typ_rs_core::metrics::{final_accuracy, gross_wpm};
-use typ_rs_core::prompt::Prompt;
 use typ_rs_core::session::{EndCondition, Outcome, SessionState};
+use typ_rs_store::{DEFAULT_PROFILE, SessionStart, Store, StoredSession, unix_now};
 
 const PROMPT_WORDS: usize = 50;
 
 /// Narrower than this and no useful prompt can be shown.
 const MIN_COLUMNS: u16 = 20;
+
+/// How many completed sessions `typ stats` lists.
+const LISTED_SESSIONS: usize = 10;
+
+const DATABASE_FILE: &str = "typ.db";
 
 static VERSION: LazyLock<String> = LazyLock::new(|| {
     format!(
@@ -33,38 +41,74 @@ static VERSION: LazyLock<String> = LazyLock::new(|| {
 /// A local terminal typing trainer that targets the character patterns you are weak on.
 #[derive(Parser)]
 #[command(name = "typ", version = VERSION.as_str())]
-struct Cli {}
+struct Cli {
+    #[command(subcommand)]
+    command: Option<Command>,
+}
+
+#[derive(Subcommand)]
+enum Command {
+    /// List recent completed sessions
+    Stats,
+}
 
 fn main() -> ExitCode {
-    let Cli {} = Cli::parse();
-
-    if let Err(message) = check_terminal() {
-        eprintln!("typ: {message}");
-        return ExitCode::FAILURE;
-    }
-
-    let seed = getrandom::u64().expect("operating system randomness");
-    let corpus = Corpus::bundled();
-    let prompt = Prompt::new(
-        ReferenceDistribution::new(corpus)
-            .seeded_sampler(seed)
-            .take(PROMPT_WORDS)
-            .map(|id| corpus.text(id)),
-    );
-    let palette = Palette::from_no_color(std::env::var("NO_COLOR").ok().as_deref());
-
-    let run = match interactive::run(prompt, EndCondition::AfterWords(PROMPT_WORDS), palette) {
-        Ok(run) => run,
+    let cli = Cli::parse();
+    let outcome = match cli.command {
+        None => session(),
+        Some(Command::Stats) => stats(),
+    };
+    match outcome {
+        Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
             eprintln!("typ: {e}");
-            return ExitCode::FAILURE;
+            ExitCode::FAILURE
         }
-    };
-    println!("{}", results(&run.state));
+    }
+}
+
+/// Runs one session: the row is written before raw mode is entered and the
+/// events are saved after it is left, so the database is never touched while
+/// the user types.
+fn session() -> Result<(), Box<dyn Error>> {
+    check_terminal()?;
+    let mut store = open_store()?;
+    let profile = store.profile(DEFAULT_PROFILE)?;
+    let corpus = Corpus::bundled();
+    let seed = getrandom::u64()?;
+    let fallback_seed = getrandom::u64()?;
+    let started = store.start_session(
+        &profile,
+        SessionStart {
+            started_at: unix_now(),
+            seed,
+        },
+        || compose::frequency_weighted(corpus, PROMPT_WORDS, fallback_seed),
+    )?;
+    let end = EndCondition::AfterWords(started.prompt.word_count());
+    let palette = Palette::from_no_color(std::env::var("NO_COLOR").ok().as_deref());
+
+    let run = interactive::run(started.prompt, end, palette)?;
+
+    // Save before printing, but compute the results first so that a
+    // persistence failure still shows them, followed by the error.
+    let results = results(&run.state);
+    let next = compose::frequency_weighted(corpus, PROMPT_WORDS, seed);
+    let saved = store.finish_session(started.id, &run.state, next, unix_now());
+    println!("{results}");
     if std::env::var_os("TYP_DIAGNOSTICS").is_some_and(|v| !v.is_empty()) {
         eprintln!("{}", render_diagnostics(&run.render_micros));
     }
-    ExitCode::SUCCESS
+    saved.map_err(|e| format!("the session was not saved: {e}"))?;
+    Ok(())
+}
+
+fn stats() -> Result<(), Box<dyn Error>> {
+    let store = open_store()?;
+    let profile = store.profile(DEFAULT_PROFILE)?;
+    let sessions = store.completed_sessions(&profile, LISTED_SESSIONS)?;
+    print!("{}", session_listing(&sessions));
+    Ok(())
 }
 
 /// A session needs a real terminal that is wide enough to show a prompt.
@@ -80,6 +124,25 @@ fn check_terminal() -> Result<(), String> {
         ));
     }
     Ok(())
+}
+
+fn open_store() -> Result<Store, Box<dyn Error>> {
+    let dir = data_dir()?;
+    std::fs::create_dir_all(&dir)
+        .map_err(|e| format!("could not create {}: {e}", dir.display()))?;
+    let path = dir.join(DATABASE_FILE);
+    Store::open(&path).map_err(|e| format!("could not open {}: {e}", path.display()).into())
+}
+
+/// `$TYP_DATA_DIR` if set, otherwise `typ` under the platform's data
+/// directory (`~/.local/share` on Linux).
+fn data_dir() -> Result<PathBuf, String> {
+    if let Some(dir) = std::env::var_os("TYP_DATA_DIR").filter(|d| !d.is_empty()) {
+        return Ok(PathBuf::from(dir));
+    }
+    dirs::data_dir()
+        .map(|d| d.join("typ"))
+        .ok_or_else(|| "could not determine the data directory; set TYP_DATA_DIR".to_string())
 }
 
 /// The line printed when a session ends. Speed is reported only for a
@@ -99,6 +162,27 @@ fn results(state: &SessionState) -> String {
     }
 }
 
+/// One line per completed session, most recent first, with the same figures
+/// the session printed when it ended.
+fn session_listing(sessions: &[StoredSession]) -> String {
+    if sessions.is_empty() {
+        return "no completed sessions yet\n".to_string();
+    }
+    sessions
+        .iter()
+        .map(|session| {
+            let state = session.replay();
+            let wpm = gross_wpm(&state).unwrap_or(0.0);
+            let accuracy = 100.0 * final_accuracy(&state);
+            format!(
+                "{}  {:>3} words  {wpm:>3.0} wpm  {accuracy:>5.1}% accuracy\n",
+                session.started_at_local,
+                session.prompt.word_count()
+            )
+        })
+        .collect()
+}
+
 fn render_diagnostics(render_micros: &[u64]) -> String {
     let batches = render_micros.len();
     let total: u64 = render_micros.iter().sum();
@@ -114,6 +198,7 @@ fn render_diagnostics(render_micros: &[u64]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use typ_rs_core::prompt::Prompt;
     use typ_rs_core::session::{Input, Key};
 
     fn run(prompt: &str, script: &str) -> SessionState {

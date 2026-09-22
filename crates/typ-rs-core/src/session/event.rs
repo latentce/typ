@@ -73,6 +73,30 @@ impl EventKind {
             EventKind::Char | EventKind::Backspace | EventKind::Space
         )
     }
+
+    /// The kind's stable name, as stored with the event. Never renamed: a
+    /// stored session must read back under any later version.
+    pub fn name(self) -> &'static str {
+        match self {
+            EventKind::Char => "char",
+            EventKind::Backspace => "backspace",
+            EventKind::Space => "space",
+            EventKind::Resize => "resize",
+            EventKind::Interrupt => "interrupt",
+        }
+    }
+
+    /// The kind with the given stored name, if this version knows it.
+    pub fn from_name(name: &str) -> Option<EventKind> {
+        match name {
+            "char" => Some(EventKind::Char),
+            "backspace" => Some(EventKind::Backspace),
+            "space" => Some(EventKind::Space),
+            "resize" => Some(EventKind::Resize),
+            "interrupt" => Some(EventKind::Interrupt),
+            _ => None,
+        }
+    }
 }
 
 /// Quality flags recorded with an event so that the analysis can decide
@@ -114,4 +138,25 @@ pub struct InputEvent {
     pub word_index: usize,
     pub position: usize,
     pub flags: EventFlags,
+}
+
+impl InputEvent {
+    /// The input that produced this event, so that a stored event log can be
+    /// applied again. The resolved fields and timing flags are dropped: the
+    /// session derives them afresh.
+    pub fn input(&self) -> Input {
+        let key = match self.kind {
+            EventKind::Char => Key::Char(self.actual.expect("a char event carries its character")),
+            EventKind::Space => Key::Char(' '),
+            EventKind::Backspace => Key::Backspace,
+            EventKind::Resize => Key::Resize,
+            EventKind::Interrupt => Key::Interrupt,
+        };
+        Input {
+            at_micros: self.at_micros,
+            key,
+            in_paste: self.flags.in_paste,
+            burst: self.flags.burst,
+        }
+    }
 }
