@@ -1,13 +1,16 @@
 //! Persistence for `typ`: profiles, prompts, sessions, and input events in a
-//! local SQLite file, plus the prompt composed ahead for the next session.
+//! local SQLite file, plus the caches derived from them: the pattern
+//! statistics and the prompt composed ahead for the next session.
 //!
 //! The database is opened once per process. Sessions, prompts, and input
 //! events are the source of truth: a session's row is written before it
-//! starts and its events at the end, and neither is changed afterwards. The
-//! next prompt is a cache, consumed when a session starts and replaced when
-//! one ends. Nothing here runs while a session is being typed.
+//! starts and its events at the end, and neither is changed afterwards.
+//! Everything else is a cache rebuilt from them: the pattern statistics
+//! whenever the model version changes, the next prompt when a session
+//! ends. Nothing here runs while a session is being typed.
 
 mod migrations;
+mod model;
 mod prompts;
 mod sessions;
 
@@ -16,6 +19,7 @@ use std::path::Path;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use rusqlite::{Connection, OptionalExtension, params};
+use typ_rs_core::model::SchedulerConfig;
 
 pub use sessions::{SessionId, SessionStart, StartedSession, StoredSession};
 
@@ -93,12 +97,15 @@ pub struct Profile {
 /// An open database.
 pub struct Store {
     conn: Connection,
+    config: SchedulerConfig,
 }
 
 impl Store {
-    /// Opens or creates the database file, brings its schema up to date, and
-    /// makes sure the default profile exists. The parent directory must
-    /// already exist.
+    /// Opens or creates the database file, brings its schema up to date,
+    /// makes sure the default profile exists, and brings the pattern
+    /// statistics in step with this binary: rebuilt if they were written
+    /// under another model version, otherwise extended with any ended
+    /// session not yet applied. The parent directory must already exist.
     pub fn open(path: &Path) -> Result<Store> {
         let mut conn = Connection::open(path)?;
         conn.busy_timeout(BUSY_TIMEOUT)?;
@@ -111,7 +118,18 @@ impl Store {
             "INSERT OR IGNORE INTO profiles (name, layout, mode, created_at) VALUES (?1, ?2, ?3, ?4)",
             params![DEFAULT_PROFILE, DEFAULT_LAYOUT, WORDS_MODE, now],
         )?;
-        Ok(Store { conn })
+        let mut store = Store {
+            conn,
+            config: SchedulerConfig::default(),
+        };
+        store.reconcile()?;
+        Ok(store)
+    }
+
+    /// The tunables every session run through this store is recorded with
+    /// and applied under.
+    pub fn config(&self) -> &SchedulerConfig {
+        &self.config
     }
 
     /// Looks a profile up by name.

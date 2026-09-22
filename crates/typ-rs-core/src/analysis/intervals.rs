@@ -7,13 +7,13 @@
 //! than the hesitation threshold is a hesitation instead.
 
 use super::attempt::{Keystroke, Role};
-use super::{Exclusion, Interval, IntervalClass, median};
+use super::{Exclusion, HesitationThreshold, Interval, IntervalClass, median};
 use crate::prompt::Slot;
 use crate::session::{LONG_PAUSE_MICROS, SessionState};
 
-/// The hesitation threshold is this multiple of the running median clean
-/// latency, and never below [`LONG_PAUSE_MICROS`].
-const HESITATION_MULTIPLE: u64 = 4;
+/// The hesitation threshold is this multiple of a typical clean latency,
+/// and never below [`LONG_PAUSE_MICROS`].
+const HESITATION_MULTIPLE: f64 = 4.0;
 
 /// Classifies every keystroke's interval. `first_uncorrected_error[w]` is the
 /// position in word `w` after which slots follow an uncorrected error.
@@ -21,12 +21,13 @@ pub(super) fn classify(
     state: &SessionState,
     keystrokes: &[Keystroke],
     first_uncorrected_error: &[Option<usize>],
+    threshold: HesitationThreshold,
 ) -> Vec<Interval> {
     let events = state.events();
     let prompt = state.prompt();
     let mut intervals = Vec::new();
     let mut previous: Option<(u64, Role)> = None;
-    let mut clean = RunningMedian::default();
+    let mut hesitation = Threshold::new(threshold);
     let mut started = false;
 
     for keystroke in keystrokes {
@@ -69,13 +70,11 @@ pub(super) fn classify(
             IntervalClass::Excluded(reasons)
         } else {
             let latency = latency.expect("only the first keystroke has no latency");
-            let threshold = clean.hesitation_threshold();
-            if latency > threshold {
-                IntervalClass::Hesitation {
-                    threshold_micros: threshold,
-                }
+            let threshold_micros = hesitation.micros();
+            if latency > threshold_micros {
+                IntervalClass::Hesitation { threshold_micros }
             } else {
-                clean.push(latency);
+                hesitation.observe_clean(latency);
                 IntervalClass::Clean
             }
         };
@@ -102,22 +101,43 @@ pub(super) fn classify(
     intervals
 }
 
-/// The clean latencies so far, kept sorted so the median is at hand.
-#[derive(Default)]
-struct RunningMedian {
-    sorted: Vec<u64>,
+/// The hesitation threshold as the session proceeds: fixed from the user
+/// baseline, or following the clean latencies seen so far.
+enum Threshold {
+    Fixed(u64),
+    Running {
+        /// The clean latencies so far, kept sorted so the median is at hand.
+        sorted: Vec<u64>,
+    },
 }
 
-impl RunningMedian {
-    fn push(&mut self, latency: u64) {
-        let at = self.sorted.partition_point(|&l| l < latency);
-        self.sorted.insert(at, latency);
+impl Threshold {
+    fn new(threshold: HesitationThreshold) -> Threshold {
+        match threshold {
+            HesitationThreshold::RunningMedian => Threshold::Running { sorted: Vec::new() },
+            HesitationThreshold::UserBaseline(log_seconds) => {
+                Threshold::Fixed(over_typical(log_seconds.exp() * 1_000_000.0))
+            }
+        }
     }
 
-    /// `max(1.5 s, 4 × median)`; the floor alone until a clean latency exists.
-    fn hesitation_threshold(&self) -> u64 {
-        median(&self.sorted).map_or(LONG_PAUSE_MICROS, |m| {
-            (m * HESITATION_MULTIPLE).max(LONG_PAUSE_MICROS)
-        })
+    fn observe_clean(&mut self, latency: u64) {
+        if let Threshold::Running { sorted } = self {
+            let at = sorted.partition_point(|&l| l < latency);
+            sorted.insert(at, latency);
+        }
     }
+
+    fn micros(&self) -> u64 {
+        match self {
+            Threshold::Fixed(micros) => *micros,
+            Threshold::Running { sorted } => median(sorted, |a, b| (a + b) / 2)
+                .map_or(LONG_PAUSE_MICROS, |m| over_typical(m as f64)),
+        }
+    }
+}
+
+/// `max(1.5 s, 4 × typical)` in microseconds.
+fn over_typical(typical_micros: f64) -> u64 {
+    ((typical_micros * HESITATION_MULTIPLE) as u64).max(LONG_PAUSE_MICROS)
 }

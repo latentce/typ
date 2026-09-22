@@ -6,16 +6,23 @@ use std::str::FromStr;
 
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 use typ_rs_core::corpus::CORPUS_VERSION;
+use typ_rs_core::model::{MODEL_VERSION, ModelState};
 use typ_rs_core::prompt::Prompt;
 use typ_rs_core::session::{
     EndCondition, EventFlags, EventKind, InputEvent, Outcome, SEMANTICS_VERSION, SessionState,
 };
 
-use crate::{Error, Profile, Result, Store, prompts};
+use crate::{Error, Profile, Result, Store, model, prompts};
 
 /// A session's row id, the handle a user names a stored session by.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct SessionId(i64);
+
+impl SessionId {
+    pub(crate) fn raw(self) -> i64 {
+        self.0
+    }
+}
 
 impl fmt::Display for SessionId {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -52,6 +59,7 @@ pub struct StartedSession {
 #[derive(Debug, Clone, PartialEq)]
 pub struct StoredSession {
     pub id: SessionId,
+    pub(crate) profile_id: i64,
     /// Wall clock, Unix seconds.
     pub started_at: i64,
     /// `started_at` in the local time zone as `YYYY-MM-DD HH:MM`, formatted
@@ -81,16 +89,13 @@ impl StoredSession {
     }
 }
 
-/// Every tunable of the composition, serialised with the session. There are
-/// none yet.
-const CONFIG_JSON: &str = "{}";
-
 impl Store {
     /// Records that a session is about to start and returns its prompt: the
     /// one composed ahead for the profile if there is one (it is consumed, so
     /// it is never shown twice), otherwise the one `compose` produces. The row
     /// is committed with status `interrupted` before this returns, so a
-    /// session the process dies in is still recorded.
+    /// session the process dies in is still recorded. The store's config is
+    /// recorded with the row as what the session ran under.
     pub fn start_session(
         &mut self,
         profile: &Profile,
@@ -121,7 +126,7 @@ impl Store {
                 profile.mode,
                 CORPUS_VERSION,
                 SEMANTICS_VERSION,
-                CONFIG_JSON,
+                self.config.to_json(),
                 start.seed as i64,
             ],
         )?;
@@ -131,12 +136,16 @@ impl Store {
     }
 
     /// Ends a session in one transaction: writes its events, sets its status
-    /// from the state's outcome, and stores `next_prompt` as the prompt for
-    /// the profile's next session. A session can end only once.
+    /// from the state's outcome, writes the pattern statistics the session
+    /// changed (`model` is the profile's model with the session applied),
+    /// marks the session applied under the current model version, and stores
+    /// `next_prompt` as the prompt for the profile's next session. A session
+    /// can end only once.
     pub fn finish_session(
         &mut self,
         id: SessionId,
         state: &SessionState,
+        model: &ModelState,
         next_prompt: Prompt,
         ended_at: i64,
     ) -> Result<()> {
@@ -158,9 +167,11 @@ impl Store {
         insert_events(&tx, id, state.events())?;
         let outcome = state.outcome().unwrap_or(Outcome::Interrupted);
         tx.execute(
-            "UPDATE sessions SET status = ?2, ended_at = ?3 WHERE id = ?1",
-            params![id.0, outcome.name(), ended_at],
+            "UPDATE sessions SET status = ?2, ended_at = ?3, applied_model_version = ?4
+             WHERE id = ?1",
+            params![id.0, outcome.name(), ended_at, MODEL_VERSION],
         )?;
+        model::write(&tx, profile_id, model.dirty())?;
 
         let next_id = prompts::insert(&tx, profile_id, &next_prompt, ended_at)?;
         prompts::set_next(&tx, profile_id, next_id)?;
@@ -170,7 +181,7 @@ impl Store {
 
     /// Reads one session back, whether or not it has ended.
     pub fn session(&self, id: SessionId) -> Result<StoredSession> {
-        self.load_sessions("WHERE s.id = ?1", [id.0])?
+        load_sessions(&self.conn, "WHERE s.id = ?1", [id.0])?
             .pop()
             .ok_or(Error::NoSuchSession(id))
     }
@@ -183,56 +194,60 @@ impl Store {
         profile: &Profile,
         limit: usize,
     ) -> Result<Vec<StoredSession>> {
-        self.load_sessions(
+        load_sessions(
+            &self.conn,
             "WHERE s.profile_id = ?1 AND s.status = 'completed'
                AND EXISTS (SELECT 1 FROM input_events e WHERE e.session_id = s.id)
              ORDER BY s.started_at DESC, s.id DESC LIMIT ?2",
             params![profile.id, limit as i64],
         )
     }
+}
 
-    fn load_sessions(
-        &self,
-        clause: &str,
-        bindings: impl rusqlite::Params,
-    ) -> Result<Vec<StoredSession>> {
-        let mut stmt = self.conn.prepare(&format!(
-            "SELECT s.id, s.started_at,
-                    strftime('%Y-%m-%d %H:%M', s.started_at, 'unixepoch', 'localtime'),
-                    s.ended_at, s.status, s.semantics_version, s.prompt_id
-             FROM sessions s {clause}"
-        ))?;
-        let rows: Vec<SessionRow> = stmt
-            .query_map(bindings, |row| {
-                Ok(SessionRow {
-                    id: SessionId(row.get(0)?),
-                    started_at: row.get(1)?,
-                    started_at_local: row.get(2)?,
-                    ended_at: row.get(3)?,
-                    status: row.get(4)?,
-                    semantics_version: row.get(5)?,
-                    prompt_id: row.get(6)?,
-                })
-            })?
-            .collect::<rusqlite::Result<_>>()?;
-
-        rows.into_iter()
-            .map(|row| {
-                Ok(StoredSession {
-                    id: row.id,
-                    started_at: row.started_at,
-                    started_at_local: row.started_at_local,
-                    ended_at: row.ended_at,
-                    outcome: Outcome::from_name(&row.status).ok_or_else(|| {
-                        Error::Corrupt(format!("unknown session status {:?}", row.status))
-                    })?,
-                    semantics_version: row.semantics_version,
-                    prompt: prompts::load(&self.conn, row.prompt_id)?,
-                    events: load_events(&self.conn, row.id)?,
-                })
+/// Loads the sessions matching `clause`.
+pub(crate) fn load_sessions(
+    conn: &Connection,
+    clause: &str,
+    bindings: impl rusqlite::Params,
+) -> Result<Vec<StoredSession>> {
+    let mut stmt = conn.prepare(&format!(
+        "SELECT s.id, s.started_at,
+                strftime('%Y-%m-%d %H:%M', s.started_at, 'unixepoch', 'localtime'),
+                s.ended_at, s.status, s.semantics_version, s.prompt_id, s.profile_id
+         FROM sessions s {clause}"
+    ))?;
+    let rows: Vec<SessionRow> = stmt
+        .query_map(bindings, |row| {
+            Ok(SessionRow {
+                id: SessionId(row.get(0)?),
+                started_at: row.get(1)?,
+                started_at_local: row.get(2)?,
+                ended_at: row.get(3)?,
+                status: row.get(4)?,
+                semantics_version: row.get(5)?,
+                prompt_id: row.get(6)?,
+                profile_id: row.get(7)?,
             })
-            .collect()
-    }
+        })?
+        .collect::<rusqlite::Result<_>>()?;
+
+    rows.into_iter()
+        .map(|row| {
+            Ok(StoredSession {
+                id: row.id,
+                profile_id: row.profile_id,
+                started_at: row.started_at,
+                started_at_local: row.started_at_local,
+                ended_at: row.ended_at,
+                outcome: Outcome::from_name(&row.status).ok_or_else(|| {
+                    Error::Corrupt(format!("unknown session status {:?}", row.status))
+                })?,
+                semantics_version: row.semantics_version,
+                prompt: prompts::load(conn, row.prompt_id)?,
+                events: load_events(conn, row.id)?,
+            })
+        })
+        .collect()
 }
 
 /// One row of `sessions` as read, before its prompt and events are loaded.
@@ -244,6 +259,7 @@ struct SessionRow {
     status: String,
     semantics_version: u32,
     prompt_id: i64,
+    profile_id: i64,
 }
 
 fn insert_events(conn: &Connection, session: SessionId, events: &[InputEvent]) -> Result<()> {

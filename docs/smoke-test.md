@@ -48,14 +48,18 @@ apart from your own history.
 12. **Stats during a session.** `just run` in one terminal and, while it is
     waiting for input, `just run stats` in another (with the same
     `TYP_DATA_DIR`). The listing shows the sessions completed above, most
-    recent first, and neither command disturbs the other. Finish or
-    interrupt the session: the next `just run` shows a different prompt.
+    recent first, followed by the slowest and most error-prone patterns so
+    far, and neither command disturbs the other. Finish or interrupt the
+    session: the next `just run` shows a different prompt.
 13. **Replay.** `just run replay N` with an id from the listing. The first
     lines repeat the results the session printed; below them every word
     shows its first attempt and the errors attributed to patterns, and every
     keystroke its interval class. The corrections you typed in step 2 show
     as `excluded: backspace` / `replacement`, the resize as `after_resize`,
     the paste as `in_paste`, and any long pause as a hesitation.
+14. **Rebuild.** `just run stats > /tmp/before`, then `just run rebuild`
+    (it reports how many sessions it reapplied) and `just run stats` again:
+    the output is identical to `/tmp/before`.
 
 Setting `TYP_DIAGNOSTICS=1` prints the render timing per input batch (count,
 mean, max) to stderr after the results, for checking that painting stays well

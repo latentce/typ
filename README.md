@@ -13,16 +13,27 @@ Early. `typ` runs one 50-word session: the prompt appears inline below the
 command, you type it, and it reports gross WPM, raw (first-attempt) accuracy,
 final accuracy, and consistency. Every session is saved, including
 interrupted ones, and the prompt for your next session is composed as soon as
-the current one ends. `typ stats` lists your recent completed sessions with
-their ids; `typ replay <id>` shows how a stored session was interpreted: each
-word's first attempt and the patterns its errors count against, and which
-keystroke intervals count as clean motor evidence. Statistics and the
-scheduler are being built on top of this.
+the current one ends.
+
+After each session `typ` updates decaying statistics for every character,
+bigram, and trigram you typed (space counts as an ordinary character, so the
+start and end of words are patterns too), normalised for your usual speed and
+for how fast you were going that day. `typ stats` lists your recent completed
+sessions with their ids, then the ten patterns you are slowest on relative to
+your baseline and the ten you most often get wrong, each with how much
+evidence is behind it. Every statistic is a cache: `typ rebuild` recomputes
+all of them from your stored sessions, and an upgrade that changes the
+algorithm does so automatically. `typ replay <id>` shows how a stored session
+was interpreted: each word's first attempt and the patterns its errors count
+against, and which keystroke intervals count as clean motor evidence. The
+scheduler that turns these statistics into targeted prompts is being built
+on top of this.
 
 ```
 $ typ --version
 $ typ
 $ typ stats
+$ typ rebuild
 $ typ replay 12
 ```
 

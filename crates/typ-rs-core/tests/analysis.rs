@@ -1,4 +1,6 @@
-use typ_rs_core::analysis::{Edit, Exclusion, IntervalClass, SessionAnalysis, analyze};
+use typ_rs_core::analysis::{
+    Edit, Exclusion, HesitationThreshold, IntervalClass, SessionAnalysis, analyze, analyze_with,
+};
 use typ_rs_core::prompt::{Prompt, Slot};
 use typ_rs_core::session::{EndCondition, Input, Key, SessionState};
 
@@ -385,6 +387,35 @@ fn the_hesitation_threshold_rises_with_the_running_median_of_clean_latencies() {
 fn a_structurally_excluded_interval_is_not_a_hesitation_however_long() {
     let analysis = run("cat dog", "cxt⌫…⌫at dog");
     assert_eq!(classes(&analysis)[4], "[Backspace, AfterCorrection]");
+}
+
+#[test]
+fn with_a_user_baseline_the_threshold_is_four_times_it_and_fixed_for_the_session() {
+    // A baseline of 600 ms puts the threshold at 2.4 s for every interval,
+    // so a 2.1 s gap is clean however fast the session's own keystrokes are.
+    let baseline = 0.6f64.ln();
+    let analysis = analyze_with(
+        &state("catalog dog", "catal…og dog"),
+        HesitationThreshold::UserBaseline(baseline),
+    );
+    assert_eq!(classes(&analysis)[5], "clean");
+
+    // A baseline of 100 ms would put it at 400 ms; the 1.5 s floor holds.
+    let analysis = analyze_with(
+        &state("catalog dog", "cat·alog dog"),
+        HesitationThreshold::UserBaseline(0.1f64.ln()),
+    );
+    assert_eq!(classes(&analysis)[3], "clean");
+    let analysis = analyze_with(
+        &state("catalog dog", "cat…alog dog"),
+        HesitationThreshold::UserBaseline(0.1f64.ln()),
+    );
+    assert_eq!(
+        analysis.intervals[3].class,
+        IntervalClass::Hesitation {
+            threshold_micros: 1_500_000
+        }
+    );
 }
 
 #[test]

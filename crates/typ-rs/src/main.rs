@@ -49,8 +49,11 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
-    /// List recent completed sessions
+    /// List recent completed sessions and the patterns you are slowest and
+    /// most error-prone on
     Stats,
+    /// Recompute every statistic from the stored sessions
+    Rebuild,
     /// Show how a stored session was interpreted: every word's first
     /// attempt and attributed errors, and every interval's classification
     Replay {
@@ -64,6 +67,7 @@ fn main() -> ExitCode {
     let outcome = match cli.command {
         None => session(),
         Some(Command::Stats) => stats(),
+        Some(Command::Rebuild) => rebuild(),
         Some(Command::Replay { session_id }) => replay(session_id),
     };
     match outcome {
@@ -77,7 +81,8 @@ fn main() -> ExitCode {
 
 /// Runs one session: the row is written before raw mode is entered and the
 /// events are saved after it is left, so the database is never touched while
-/// the user types.
+/// the user types. Afterwards the session is applied to the profile's
+/// pattern statistics and everything is saved in one transaction.
 fn session() -> Result<(), Box<dyn Error>> {
     check_terminal()?;
     let mut store = open_store()?;
@@ -85,25 +90,32 @@ fn session() -> Result<(), Box<dyn Error>> {
     let corpus = Corpus::bundled();
     let seed = getrandom::u64()?;
     let fallback_seed = getrandom::u64()?;
-    let started = store.start_session(
-        &profile,
-        SessionStart {
-            started_at: unix_now(),
-            seed,
-        },
-        || compose::frequency_weighted(corpus, PROMPT_WORDS, fallback_seed),
-    )?;
+    let started_at = unix_now();
+    let started = store.start_session(&profile, SessionStart { started_at, seed }, || {
+        compose::frequency_weighted(corpus, PROMPT_WORDS, fallback_seed)
+    })?;
     let end = EndCondition::AfterWords(started.prompt.word_count());
     let palette = Palette::from_no_color(std::env::var("NO_COLOR").ok().as_deref());
 
     let run = interactive::run(started.prompt, end, palette)?;
 
     // Save before printing, but compute the results first so that a
-    // persistence failure still shows them, followed by the error.
-    let analysis = analyze(&run.state);
-    let results = report::results(&run.state, &analysis.metrics);
+    // persistence failure still shows them, followed by the error. The
+    // results come from the same analysis the statistics were built from,
+    // unless the model could not even be loaded.
     let next = compose::frequency_weighted(corpus, PROMPT_WORDS, seed);
-    let saved = store.finish_session(started.id, &run.state, next, unix_now());
+    let (results, saved) = match store.model(&profile) {
+        Ok(mut model) => {
+            let update = model.apply_session(&run.state, started_at, store.config());
+            let results = report::results(&run.state, &update.analysis.metrics);
+            let saved = store.finish_session(started.id, &run.state, &model, next, unix_now());
+            (results, saved)
+        }
+        Err(e) => (
+            report::results(&run.state, &analyze(&run.state).metrics),
+            Err(e),
+        ),
+    };
     println!("{results}");
     if std::env::var_os("TYP_DIAGNOSTICS").is_some_and(|v| !v.is_empty()) {
         eprintln!("{}", render_diagnostics(&run.render_micros));
@@ -117,13 +129,27 @@ fn stats() -> Result<(), Box<dyn Error>> {
     let profile = store.profile(DEFAULT_PROFILE)?;
     let sessions = store.completed_sessions(&profile, LISTED_SESSIONS)?;
     print!("{}", report::session_listing(&sessions));
+    let model = store.model(&profile)?;
+    print!("{}", report::pattern_summary(&model, store.config()));
+    Ok(())
+}
+
+fn rebuild() -> Result<(), Box<dyn Error>> {
+    let mut store = open_store()?;
+    let sessions = store.rebuild()?;
+    println!(
+        "rebuilt the statistics from {sessions} {}",
+        if sessions == 1 { "session" } else { "sessions" }
+    );
     Ok(())
 }
 
 /// Runs a stored session's events through the current analysis. The events
 /// are applied under the current editing rules, so a session recorded under
 /// older ones is flagged: its interpretation may differ from what the user
-/// saw.
+/// saw. The hesitation threshold follows the session's own running median,
+/// since the user baseline in force when it was applied is not stored, so a
+/// borderline pause may class differently here than it did in the model.
 fn replay(session_id: SessionId) -> Result<(), Box<dyn Error>> {
     let store = open_store()?;
     let session = store.session(session_id)?;

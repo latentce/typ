@@ -7,7 +7,7 @@
 //! word's first attempt to its target to attribute errors to patterns,
 //! classifies every keystroke's incoming latency as clean motor evidence or
 //! not, and computes the session's metrics. The terminal prints from it,
-//! `typ replay` shows it, and the pattern statistics will be built from it.
+//! `typ replay` shows it, and the pattern statistics are built from it.
 //! Nothing here depends on a terminal or a database.
 
 mod alignment;
@@ -157,6 +157,18 @@ pub enum IntervalClass {
     Excluded(Vec<Exclusion>),
 }
 
+/// Where the hesitation threshold comes from. It is never below 1.5 s and
+/// otherwise four times a typical clean latency.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum HesitationThreshold {
+    /// Four times the running median of the session's own clean latencies
+    /// so far; the floor alone until one exists.
+    RunningMedian,
+    /// Four times the user baseline, given as the typical clean log-latency
+    /// in seconds, fixed for the whole session.
+    UserBaseline(f64),
+}
+
 /// Why an interval carries no motor evidence.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Exclusion {
@@ -221,8 +233,15 @@ pub struct SessionMetrics {
     pub clean_intervals: usize,
 }
 
-/// Analyses a finished session.
+/// Analyses a finished session with the hesitation threshold taken from the
+/// running median of its own clean latencies. This is the classification
+/// for a first session and for a replay without the baseline of the time.
 pub fn analyze(state: &SessionState) -> SessionAnalysis {
+    analyze_with(state, HesitationThreshold::RunningMedian)
+}
+
+/// Analyses a finished session with the given hesitation threshold.
+pub fn analyze_with(state: &SessionState, threshold: HesitationThreshold) -> SessionAnalysis {
     let reconstruction = attempt::reconstruct(state);
     let prompt = state.prompt();
     let words: Vec<WordAnalysis> = reconstruction
@@ -264,7 +283,12 @@ pub fn analyze(state: &SessionState) -> SessionAnalysis {
 
     let first_uncorrected: Vec<Option<usize>> =
         words.iter().map(|w| w.first_uncorrected_error).collect();
-    let intervals = intervals::classify(state, &reconstruction.keystrokes, &first_uncorrected);
+    let intervals = intervals::classify(
+        state,
+        &reconstruction.keystrokes,
+        &first_uncorrected,
+        threshold,
+    );
     let metrics = session_metrics(state, &words, &intervals, &reconstruction);
     SessionAnalysis {
         words,
@@ -314,14 +338,14 @@ fn session_metrics(
         corrections,
         correction_overhead: per_target_char(corrections as f64),
         uncorrected_errors: submitted().map(|w| w.uncorrected_errors).sum(),
-        error_latency_micros: median(&error_latencies),
+        error_latency_micros: median(&error_latencies, |a, b| (a + b) / 2),
         consistency: consistency(&clean),
         clean_intervals: clean.len(),
     }
 }
 
-/// The middle value of a sorted list, or the mean of the two middle ones.
-fn median(sorted: &[u64]) -> Option<u64> {
+/// The middle value of a sorted list, or `between` the two middle ones.
+pub(crate) fn median<T: Copy>(sorted: &[T], between: impl FnOnce(T, T) -> T) -> Option<T> {
     let n = sorted.len();
     if n == 0 {
         return None;
@@ -329,7 +353,7 @@ fn median(sorted: &[u64]) -> Option<u64> {
     Some(if n % 2 == 1 {
         sorted[n / 2]
     } else {
-        (sorted[n / 2 - 1] + sorted[n / 2]) / 2
+        between(sorted[n / 2 - 1], sorted[n / 2])
     })
 }
 

@@ -5,5 +5,6 @@ pub mod compose;
 pub mod corpus;
 pub mod display;
 pub mod metrics;
+pub mod model;
 pub mod prompt;
 pub mod session;

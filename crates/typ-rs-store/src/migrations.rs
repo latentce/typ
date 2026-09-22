@@ -8,7 +8,10 @@ use rusqlite::{Connection, TransactionBehavior, params};
 
 use crate::{Error, Result};
 
-const MIGRATIONS: &[&str] = &[include_str!("migrations/0001_initial.sql")];
+const MIGRATIONS: &[&str] = &[
+    include_str!("migrations/0001_initial.sql"),
+    include_str!("migrations/0002_pattern_stats.sql"),
+];
 
 pub(crate) fn run(conn: &mut Connection, now: i64) -> Result<()> {
     let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;

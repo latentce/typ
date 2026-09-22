@@ -35,9 +35,10 @@ fn typ(args: &[&str]) -> Run {
 }
 
 /// Types `script` against `prompt`, one key per 100 ms, and stores the
-/// session as started at `started_at`. Whatever prompt is waiting is
-/// replaced by `prompt` again, so every session in a test types `prompt`.
-/// `⌫` is backspace and `⎋` an interrupt.
+/// session as started at `started_at`, applied to the profile's statistics
+/// the way a live session is. Whatever prompt is waiting is replaced by
+/// `prompt` again, so every session in a test types `prompt`. `⌫` is
+/// backspace and `⎋` an interrupt.
 fn store_session(store: &mut Store, started_at: i64, prompt: &str, script: &str) {
     let profile = store.profile(DEFAULT_PROFILE).unwrap();
     let words = || Prompt::new(prompt.split(' '));
@@ -64,8 +65,10 @@ fn store_session(store: &mut Store, started_at: i64, prompt: &str, script: &str)
         };
         state.apply_event(Input::new(i as u64 * 100_000, key));
     }
+    let mut model = store.model(&profile).unwrap();
+    model.apply_session(&state, started_at, store.config());
     store
-        .finish_session(started.id, &state, words(), started_at + 60)
+        .finish_session(started.id, &state, &model, words(), started_at + 60)
         .unwrap();
 }
 
@@ -131,11 +134,62 @@ fn stats_lists_completed_sessions_most_recent_first_and_skips_interrupted_ones()
 
     let run = typ_in(dir.path(), &["stats"]);
     assert!(run.ok, "{}", run.stderr);
+    let mut sections = run.stdout.split("\n\n");
     assert_eq!(
-        run.stdout,
+        sections.next().unwrap(),
         "   2  2024-01-16 08:00    2 words  140 wpm  100.0% accuracy\n\
-         \x20  1  2024-01-15 10:30    2 words  120 wpm   66.7% accuracy\n"
+         \x20  1  2024-01-15 10:30    2 words  120 wpm   66.7% accuracy"
     );
+    let slowest = sections.next().unwrap();
+    assert!(slowest.starts_with("slowest patterns\n  "), "{slowest}");
+    // Every keystroke took 100 ms, so nothing is slower than the baseline.
+    assert!(
+        slowest
+            .lines()
+            .skip(1)
+            .all(|l| l.contains("   +0%  n_eff ")),
+        "{slowest}"
+    );
+    let errors = sections.next().unwrap();
+    // `dg` for `dog` omitted the `o`: the pattern ending there heads the
+    // list, with the whole chain behind it.
+    assert!(
+        errors.starts_with("most error-prone patterns\n  ␣do  "),
+        "{errors}"
+    );
+    assert!(
+        errors.lines().nth(2).unwrap().starts_with("  do  "),
+        "{errors}"
+    );
+    assert!(
+        errors.lines().nth(3).unwrap().starts_with("  o   "),
+        "{errors}"
+    );
+    assert_eq!(sections.next(), None);
+}
+
+#[test]
+fn rebuild_reports_how_many_sessions_it_reapplied_and_changes_nothing_visible() {
+    let dir = tempfile::tempdir().unwrap();
+    {
+        let mut store = Store::open(&dir.path().join("typ.db")).unwrap();
+        store_session(&mut store, 1_705_314_600, "cat dog", "cat dg ");
+        store_session(&mut store, 1_705_392_000, "cat dog", "cat dog");
+        store_session(&mut store, 1_705_400_000, "cat dog", "ca⎋");
+    }
+    let before = typ_in(dir.path(), &["stats"]);
+
+    let run = typ_in(dir.path(), &["rebuild"]);
+    assert!(run.ok, "{}", run.stderr);
+    assert_eq!(run.stdout, "rebuilt the statistics from 3 sessions\n");
+    assert_eq!(run.stderr, "");
+
+    let after = typ_in(dir.path(), &["stats"]);
+    assert_eq!(after.stdout, before.stdout);
+
+    let run = typ(&["rebuild"]);
+    assert!(run.ok, "{}", run.stderr);
+    assert_eq!(run.stdout, "rebuilt the statistics from 0 sessions\n");
 }
 
 #[test]

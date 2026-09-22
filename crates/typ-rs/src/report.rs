@@ -1,13 +1,17 @@
 //! The plain-text output of `typ`: the results line, the session listing,
-//! and the replay report.
+//! the pattern summary, and the replay report.
 
 use std::fmt::Write;
 
 use typ_rs_core::analysis::{
     Interval, IntervalClass, SessionAnalysis, SessionMetrics, WordAnalysis, analyze,
 };
+use typ_rs_core::model::{ModelState, PatternEstimate, ROOT, SchedulerConfig};
 use typ_rs_core::session::{EventKind, Outcome, SessionState};
 use typ_rs_store::StoredSession;
+
+/// How many patterns each list of the pattern summary shows.
+const LISTED_PATTERNS: usize = 10;
 
 /// The line printed when a session ends. Speed and accuracy are reported
 /// only for a completed session: a partial prompt has no meaningful WPM.
@@ -50,6 +54,89 @@ pub fn session_listing(sessions: &[StoredSession]) -> String {
             )
         })
         .collect()
+}
+
+/// The patterns the model believes the user is slowest on and most
+/// error-prone on: the ten with the highest absolute slowness among those
+/// with latency evidence, and the ten with the highest error probability
+/// among those with first-attempt trials, each with its effective sample
+/// size. Empty when nothing has been observed. Estimates are as of the last
+/// session applied.
+pub fn pattern_summary(model: &ModelState, config: &SchedulerConfig) -> String {
+    let Some(at) = model.last_update() else {
+        return String::new();
+    };
+    let estimates: Vec<Estimated> = model
+        .patterns()
+        .filter(|(pattern, _)| *pattern != ROOT)
+        .map(|(pattern, stats)| Estimated {
+            pattern,
+            estimate: model.estimate(pattern, at, config),
+            trials: stats.c + stats.e,
+        })
+        .collect();
+
+    let slowest = ranked(estimates.iter().filter(|e| e.estimate.n_eff > 0.0), |e| {
+        e.absolute_slowness
+    });
+    let error_prone = ranked(estimates.iter().filter(|e| e.trials > 0.0), |e| {
+        e.error_probability
+    });
+
+    let mut out = String::new();
+    if !slowest.is_empty() {
+        let _ = writeln!(out, "\nslowest patterns");
+        for e in slowest {
+            let percent = 100.0 * (e.estimate.absolute_slowness.exp() - 1.0);
+            let _ = writeln!(
+                out,
+                "  {:<3}  {percent:>+4.0}%  n_eff {:>5.1}",
+                visible(e.pattern),
+                e.estimate.n_eff
+            );
+        }
+    }
+    if !error_prone.is_empty() {
+        let _ = writeln!(out, "\nmost error-prone patterns");
+        for e in error_prone {
+            let _ = writeln!(
+                out,
+                "  {:<3}  {:>4.1}%  n_eff {:>5.1}",
+                visible(e.pattern),
+                100.0 * e.estimate.error_probability,
+                e.estimate.n_eff
+            );
+        }
+    }
+    out
+}
+
+/// One pattern's estimate together with how many first-attempt trials back
+/// its error probability.
+struct Estimated<'a> {
+    pattern: &'a str,
+    estimate: PatternEstimate,
+    trials: f64,
+}
+
+/// The top patterns by `key`, highest first, ties in pattern order.
+fn ranked<'a>(
+    candidates: impl Iterator<Item = &'a Estimated<'a>>,
+    key: impl Fn(&PatternEstimate) -> f64,
+) -> Vec<&'a Estimated<'a>> {
+    let mut ranked: Vec<&Estimated> = candidates.collect();
+    ranked.sort_by(|a, b| {
+        key(&b.estimate)
+            .total_cmp(&key(&a.estimate))
+            .then_with(|| a.pattern.cmp(b.pattern))
+    });
+    ranked.truncate(LISTED_PATTERNS);
+    ranked
+}
+
+/// A pattern with its spaces made visible.
+fn visible(pattern: &str) -> String {
+    pattern.replace(' ', "␣")
 }
 
 /// How a stored session was interpreted: the results as the user saw them,
@@ -212,5 +299,43 @@ mod tests {
         assert_eq!(run("cat dog fox", "cat do⎋"), "interrupted after 1 word");
         assert_eq!(run("cat dog fox", "cat dog ⎋"), "interrupted after 2 words");
         assert_eq!(run("cat dog fox", "⎋"), "interrupted after 0 words");
+    }
+
+    #[test]
+    fn the_pattern_summary_is_empty_until_something_has_been_observed() {
+        let config = SchedulerConfig::default();
+        assert_eq!(pattern_summary(&ModelState::new(), &config), "");
+    }
+
+    #[test]
+    fn the_pattern_summary_lists_the_slowest_and_most_error_prone_patterns_with_evidence() {
+        let config = SchedulerConfig::default();
+        let mut model = ModelState::new();
+        // `t` after `a` is typed slowly (600 ms against 100 ms elsewhere) and
+        // `x` is typed for `o`, so `cat` tops slowness and `dog` errors.
+        let mut state = SessionState::new(Prompt::new(["cat", "dog"]), EndCondition::AfterWords(2));
+        let mut at = 0;
+        for c in "cat dxg ".chars() {
+            state.apply_event(Input::new(at, Key::Char(c)));
+            at += if c == 'a' { 600_000 } else { 100_000 };
+        }
+        model.apply_session(&state, 1_000, &config);
+
+        let summary = pattern_summary(&model, &config);
+        let lines: Vec<&str> = summary.lines().collect();
+        assert_eq!(lines[0], "");
+        assert_eq!(lines[1], "slowest patterns");
+        // `t` after `at` is six times the baseline, shrunk toward its parents
+        // at every level: ln 6 / 11 for `t`, then (ln 6 + 10 × parent) / 11
+        // for `at` and `cat`, which is a +56% slowdown.
+        assert_eq!(lines[2], "  cat   +56%  n_eff   1.0", "{summary}");
+        assert!(lines[3].starts_with("  at    +36%"), "{summary}");
+        let errors = lines
+            .iter()
+            .position(|l| *l == "most error-prone patterns")
+            .unwrap();
+        assert_eq!(lines[errors - 1], "");
+        assert!(lines[errors + 1].starts_with("  ␣do  "), "{summary}");
+        assert!(!summary.contains("\n   "), "{summary}");
     }
 }

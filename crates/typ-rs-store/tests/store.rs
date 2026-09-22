@@ -3,6 +3,7 @@ use std::path::Path;
 
 use rusqlite::Connection;
 use tempfile::TempDir;
+use typ_rs_core::model::{MODEL_VERSION, ModelState, SchedulerConfig};
 use typ_rs_core::prompt::Prompt;
 use typ_rs_core::session::{EndCondition, Input, Key, Outcome, SessionState};
 use typ_rs_store::{DEFAULT_PROFILE, Error, Profile, SessionId, SessionStart, Store};
@@ -16,6 +17,8 @@ const SOURCE_OF_TRUTH: &[&str] = &[
     "prompt_targets",
     "input_events",
 ];
+
+const CACHES: &[&str] = &["pattern_stats"];
 
 fn temp_db() -> (TempDir, std::path::PathBuf) {
     let dir = tempfile::tempdir().unwrap();
@@ -75,6 +78,21 @@ fn typed(prompt: Prompt, script: &str) -> SessionState {
     state
 }
 
+/// Ends a session the way the binary does: the model is loaded, the session
+/// applied to it, and the result handed to the store with the next prompt.
+fn finish(
+    store: &mut Store,
+    profile: &Profile,
+    id: SessionId,
+    started_at: i64,
+    state: &SessionState,
+    next: &str,
+) -> typ_rs_store::Result<()> {
+    let mut model = store.model(profile).unwrap();
+    model.apply_session(state, started_at, store.config());
+    store.finish_session(id, state, &model, prompt(next), started_at + 60)
+}
+
 /// Runs a whole session through the store: start, type the script, finish
 /// with `next` as the following prompt.
 fn type_session(
@@ -87,19 +105,19 @@ fn type_session(
 ) -> (SessionId, SessionState) {
     let (id, prompt) = start(store, profile, started_at, fallback);
     let state = typed(prompt, script);
-    store
-        .finish_session(id, &state, self::prompt(next), started_at + 60)
-        .unwrap();
+    finish(store, profile, id, started_at, &state, next).unwrap();
     (id, state)
 }
 
-/// Every row of every source-of-truth table, rendered as text, keyed by table.
-fn dump(path: &Path) -> BTreeMap<&'static str, Vec<String>> {
+/// Every row of the given tables, rendered as text, keyed by table.
+fn dump_tables(path: &Path, tables: &[&'static str]) -> BTreeMap<&'static str, Vec<String>> {
     let conn = Connection::open(path).unwrap();
-    SOURCE_OF_TRUTH
+    tables
         .iter()
         .map(|table| {
-            let mut stmt = conn.prepare(&format!("SELECT * FROM {table}")).unwrap();
+            let mut stmt = conn
+                .prepare(&format!("SELECT * FROM {table} ORDER BY 1, 2"))
+                .unwrap();
             let columns = stmt.column_count();
             let rows = stmt
                 .query_map([], |row| {
@@ -114,6 +132,25 @@ fn dump(path: &Path) -> BTreeMap<&'static str, Vec<String>> {
             (*table, rows)
         })
         .collect()
+}
+
+/// Every row of every source-of-truth table.
+fn dump(path: &Path) -> BTreeMap<&'static str, Vec<String>> {
+    dump_tables(path, SOURCE_OF_TRUTH)
+}
+
+fn sql_one<T: rusqlite::types::FromSql>(path: &Path, sql: &str) -> T {
+    Connection::open(path)
+        .unwrap()
+        .query_row(sql, [], |r| r.get(0))
+        .unwrap()
+}
+
+fn sql(path: &Path, statement: &str) {
+    Connection::open(path)
+        .unwrap()
+        .execute_batch(statement)
+        .unwrap();
 }
 
 // --- Migrations and profiles ------------------------------------------------
@@ -133,7 +170,7 @@ fn opening_an_empty_file_runs_the_migrations_and_creates_the_default_profile() {
         .unwrap()
         .collect::<Result<_, _>>()
         .unwrap();
-    assert_eq!(versions, vec![1]);
+    assert_eq!(versions, vec![1, 2]);
 
     let tables: Vec<String> = conn
         .prepare("SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name")
@@ -144,6 +181,7 @@ fn opening_an_empty_file_runs_the_migrations_and_creates_the_default_profile() {
         .unwrap();
     for table in SOURCE_OF_TRUTH
         .iter()
+        .chain(CACHES)
         .chain(&["schema_migrations", "next_prompt"])
     {
         assert!(
@@ -171,7 +209,7 @@ fn reopening_does_not_rerun_migrations_or_duplicate_the_default_profile() {
     let profiles: i64 = conn
         .query_row("SELECT count(*) FROM profiles", [], |r| r.get(0))
         .unwrap();
-    assert_eq!((migrations, profiles), (1, 1));
+    assert_eq!((migrations, profiles), (2, 1));
 }
 
 #[test]
@@ -327,11 +365,9 @@ fn a_session_cannot_be_finished_twice() {
     let (mut store, profile) = open(&path);
     let (id, prompt) = start(&mut store, &profile, 1_000, "cat");
     let state = typed(prompt, "cat");
-    store
-        .finish_session(id, &state, self::prompt("next"), 1_060)
-        .unwrap();
+    finish(&mut store, &profile, id, 1_000, &state, "next").unwrap();
 
-    let again = store.finish_session(id, &state, self::prompt("other"), 1_120);
+    let again = finish(&mut store, &profile, id, 1_060, &state, "other");
     assert!(matches!(again, Err(Error::SessionAlreadyEnded(ended)) if ended == id));
     assert_eq!(store.session(id).unwrap().ended_at, Some(1_060));
 }
@@ -359,4 +395,237 @@ fn source_of_truth_rows_are_never_modified_after_a_session_ends() {
         }
     }
     assert_eq!(after["sessions"].len(), 3);
+}
+
+// --- Pattern statistics ------------------------------------------------------
+
+/// Types a varied set of sessions: two completed, one interrupted with too
+/// few clean intervals to count, one interrupted with enough, over several
+/// weeks so that decay is exercised.
+fn type_history(store: &mut Store, profile: &Profile) {
+    let day = 86_400;
+    type_session(
+        store,
+        profile,
+        1_000,
+        "the quick brown fox",
+        "the quikc⌫⌫ck brown fox",
+        "next",
+    );
+    type_session(
+        store,
+        profile,
+        1_000 + 3 * day,
+        "unused",
+        "cat dog fox owl cat dog fox owl",
+        "unused",
+    );
+    type_session(store, profile, 1_000 + 10 * day, "unused", "ca⎋", "unused");
+    let long = "the quick brown fox jumps over the lazy dog";
+    type_session(
+        store,
+        profile,
+        1_000 + 50 * day,
+        long,
+        "the quick brown fox jumps over the la⎋",
+        "unused",
+    );
+}
+
+#[test]
+fn the_config_is_stored_with_every_session_and_the_marker_is_set_when_it_ends() {
+    let (_dir, path) = temp_db();
+    let (mut store, profile) = open(&path);
+    let (id, prompt) = start(&mut store, &profile, 1_000, "cat");
+    let config_json: String = sql_one(&path, "SELECT config_json FROM sessions");
+    assert_eq!(
+        SchedulerConfig::from_json(&config_json).unwrap(),
+        *store.config()
+    );
+    let marker: Option<i64> = sql_one(&path, "SELECT applied_model_version FROM sessions");
+    assert_eq!(marker, None);
+
+    let state = typed(prompt, "cat");
+    finish(&mut store, &profile, id, 1_000, &state, "next").unwrap();
+    let marker: Option<i64> = sql_one(&path, "SELECT applied_model_version FROM sessions");
+    assert_eq!(marker, Some(i64::from(MODEL_VERSION)));
+    let version: i64 = sql_one(&path, "SELECT DISTINCT model_version FROM pattern_stats");
+    assert_eq!(version, i64::from(MODEL_VERSION));
+}
+
+#[test]
+fn the_model_read_back_is_the_one_written_and_grows_with_each_session() {
+    let (_dir, path) = temp_db();
+    let (mut store, profile) = open(&path);
+    assert_eq!(store.model(&profile).unwrap(), ModelState::new());
+
+    let (id, prompt) = start(&mut store, &profile, 1_000, "cat dog");
+    let state = typed(prompt, "cat dog");
+    let mut model = store.model(&profile).unwrap();
+    model.apply_session(&state, 1_000, store.config());
+    store
+        .finish_session(id, &state, &model, self::prompt("next"), 1_060)
+        .unwrap();
+    model.mark_clean();
+
+    let (store, profile) = open(&path);
+    let loaded = store.model(&profile).unwrap();
+    assert_eq!(loaded, model);
+    assert!(loaded.stats("cat").is_some());
+    assert!(loaded.user_baseline().is_some());
+}
+
+#[test]
+fn rebuilding_reproduces_the_caches_exactly_and_leaves_the_source_of_truth_alone() {
+    let (_dir, path) = temp_db();
+    {
+        let (mut store, profile) = open(&path);
+        type_history(&mut store, &profile);
+    }
+    let truth_before = dump(&path);
+    let caches_before = dump_tables(&path, CACHES);
+    assert!(caches_before["pattern_stats"].len() > 20);
+
+    let (mut store, _) = open(&path);
+    let reapplied = store.rebuild().unwrap();
+    assert_eq!(reapplied, 4);
+
+    assert_eq!(dump(&path), truth_before);
+    assert_eq!(dump_tables(&path, CACHES), caches_before);
+    let unmarked: i64 = sql_one(
+        &path,
+        "SELECT count(*) FROM sessions WHERE applied_model_version IS NULL",
+    );
+    assert_eq!(unmarked, 0);
+}
+
+#[test]
+fn sessions_with_no_marker_are_applied_in_start_order_when_the_store_is_next_opened() {
+    let (_dir, path) = temp_db();
+    {
+        let (mut store, profile) = open(&path);
+        type_history(&mut store, &profile);
+    }
+    let caches_before = dump_tables(&path, CACHES);
+
+    // As recorded by a version of typ with no statistics: every marker
+    // null and no cache at all. Opening applies them all, oldest first.
+    sql(
+        &path,
+        "DELETE FROM pattern_stats;
+         UPDATE sessions SET applied_model_version = NULL",
+    );
+    let (store, _) = open(&path);
+    drop(store);
+    assert_eq!(dump_tables(&path, CACHES), caches_before);
+    let unmarked: i64 = sql_one(
+        &path,
+        "SELECT count(*) FROM sessions WHERE applied_model_version IS NULL",
+    );
+    assert_eq!(unmarked, 0);
+}
+
+#[test]
+fn only_the_sessions_with_no_marker_are_applied_on_open() {
+    let (_dir, path) = temp_db();
+    {
+        let (mut store, profile) = open(&path);
+        type_history(&mut store, &profile);
+    }
+    let caches_before = dump_tables(&path, CACHES);
+
+    // One session loses its marker: it is applied again on top of the
+    // existing cache, so the cache changes, and its marker is set.
+    sql(
+        &path,
+        "UPDATE sessions SET applied_model_version = NULL WHERE id = 2",
+    );
+    let (store, _) = open(&path);
+    drop(store);
+    assert_ne!(dump_tables(&path, CACHES), caches_before);
+    let marker: Option<i64> = sql_one(
+        &path,
+        "SELECT applied_model_version FROM sessions WHERE id = 2",
+    );
+    assert_eq!(marker, Some(i64::from(MODEL_VERSION)));
+}
+
+#[test]
+fn a_running_session_or_one_the_process_died_in_is_not_applied_on_open() {
+    let (_dir, path) = temp_db();
+    {
+        let (mut store, profile) = open(&path);
+        type_session(&mut store, &profile, 1_000, "cat dog", "cat dog", "fox");
+        start(&mut store, &profile, 2_000, "unused");
+    }
+    let caches_before = dump_tables(&path, CACHES);
+
+    let (store, _) = open(&path);
+    drop(store);
+    assert_eq!(dump_tables(&path, CACHES), caches_before);
+    let markers: Vec<Option<i64>> = Connection::open(&path)
+        .unwrap()
+        .prepare("SELECT applied_model_version FROM sessions ORDER BY id")
+        .unwrap()
+        .query_map([], |r| r.get(0))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
+    assert_eq!(markers, vec![Some(i64::from(MODEL_VERSION)), None]);
+}
+
+#[test]
+fn a_cache_from_another_model_version_is_rebuilt_on_open() {
+    let (_dir, path) = temp_db();
+    {
+        let (mut store, profile) = open(&path);
+        type_history(&mut store, &profile);
+    }
+    let truth_before = dump(&path);
+    let caches_before = dump_tables(&path, CACHES);
+
+    // An older binary's cache: different stamp, different numbers.
+    sql(
+        &path,
+        "UPDATE pattern_stats SET model_version = model_version + 1, s1 = s1 + 100, c = 0;
+         UPDATE sessions SET applied_model_version = applied_model_version + 1",
+    );
+    assert_ne!(dump_tables(&path, CACHES), caches_before);
+
+    let (store, _) = open(&path);
+    drop(store);
+    assert_eq!(dump_tables(&path, CACHES), caches_before);
+    assert_eq!(dump(&path), truth_before);
+}
+
+#[test]
+fn a_marker_from_another_model_version_alone_triggers_a_rebuild() {
+    let (_dir, path) = temp_db();
+    {
+        let (mut store, profile) = open(&path);
+        type_history(&mut store, &profile);
+    }
+    let caches_before = dump_tables(&path, CACHES);
+    sql(
+        &path,
+        "DELETE FROM pattern_stats;
+         UPDATE sessions SET applied_model_version = applied_model_version + 1",
+    );
+
+    let (store, _) = open(&path);
+    drop(store);
+    assert_eq!(dump_tables(&path, CACHES), caches_before);
+}
+
+#[test]
+fn an_interrupted_session_too_short_to_count_is_still_marked_applied() {
+    let (_dir, path) = temp_db();
+    let (mut store, profile) = open(&path);
+    let (id, _) = type_session(&mut store, &profile, 1_000, "cat dog", "ca⎋", "fox");
+    let marker: Option<i64> = sql_one(
+        &path,
+        &format!("SELECT applied_model_version FROM sessions WHERE id = {id}"),
+    );
+    assert_eq!(marker, Some(i64::from(MODEL_VERSION)));
+    assert_eq!(store.model(&profile).unwrap(), ModelState::new());
 }
