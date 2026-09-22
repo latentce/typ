@@ -12,3 +12,4 @@ categories.workspace = true
 [dependencies]
 rand_core = { workspace = true }
 rand_chacha = { workspace = true }
+unicode-width = { workspace = true }

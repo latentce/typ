@@ -13,6 +13,7 @@ const ALLOWED: &[&str] = &[
     "rand_chacha",
     "ppv-lite86",
     "zerocopy",
+    "unicode-width",
 ];
 
 #[test]

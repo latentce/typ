@@ -17,4 +17,5 @@ typ-rs-store = { path = "crates/typ-rs-store", version = "0.1.0" }
 rand_core = "0.10"
 rand_chacha = "0.10"
 getrandom = "0.4"
+unicode-width = "0.2"
 clap = { version = "4", features = ["derive"] }
