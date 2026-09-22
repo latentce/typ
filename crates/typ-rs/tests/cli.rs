@@ -1,7 +1,6 @@
-use std::collections::HashSet;
 use std::process::Command;
 
-use typ_rs_core::corpus::{CORPUS_VERSION, Corpus};
+use typ_rs_core::corpus::CORPUS_VERSION;
 
 struct Run {
     ok: bool,
@@ -9,6 +8,8 @@ struct Run {
     stderr: String,
 }
 
+/// Runs `typ` with stdin closed and stdout captured, so it is not attached
+/// to a terminal.
 fn typ(args: &[&str]) -> Run {
     let output = Command::new(env!("CARGO_BIN_EXE_typ"))
         .args(args)
@@ -43,21 +44,15 @@ fn version_shows_the_licence_and_the_corpus_attribution_under_both_flags() {
 }
 
 #[test]
-fn a_bare_run_prints_fifty_corpus_words_on_one_line() {
+fn a_session_refuses_to_start_without_an_interactive_terminal() {
     let run = typ(&[]);
 
-    assert!(run.ok, "{}", run.stderr);
-    assert_eq!(run.stdout.lines().count(), 1, "{:?}", run.stdout);
-    let words: Vec<&str> = run.stdout.trim_end().split(' ').collect();
-    assert_eq!(words.len(), 50, "{}", run.stdout);
-
-    let known: HashSet<&str> = Corpus::bundled().words().iter().map(|w| &*w.text).collect();
-    for word in &words {
-        assert!(known.contains(word), "{word:?} is not a corpus word");
-    }
-}
-
-#[test]
-fn each_run_draws_a_fresh_prompt() {
-    assert_ne!(typ(&[]).stdout, typ(&[]).stdout);
+    assert!(!run.ok);
+    assert_eq!(run.stdout, "");
+    assert_eq!(run.stderr.lines().count(), 1, "{:?}", run.stderr);
+    assert!(
+        run.stderr.contains("interactive terminal"),
+        "{:?}",
+        run.stderr
+    );
 }

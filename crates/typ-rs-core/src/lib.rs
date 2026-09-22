@@ -2,5 +2,6 @@
 
 pub mod corpus;
 pub mod display;
+pub mod metrics;
 pub mod prompt;
 pub mod session;

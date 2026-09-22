@@ -9,14 +9,18 @@ Everything is local: no account, no server, no telemetry.
 
 ## Status
 
-Early. `typ` currently prints a 50-word prompt drawn from the corpus and
-exits; the interactive session, statistics, and scheduler are being built on
-top of it.
+Early. `typ` currently runs one 50-word session: the prompt appears inline
+below the command, you type it, and it reports gross WPM and final accuracy.
+Nothing is saved yet; statistics and the scheduler are being built on top of
+it.
 
 ```
 $ typ --version
 $ typ
 ```
+
+Set `NO_COLOR` to get bold and underline instead of colour. `Ctrl-C` or `Esc`
+ends a session early.
 
 ## Installing
 
@@ -43,6 +47,9 @@ just check            # fmt, clippy, tests: run before committing
 
 Without it, the equivalents are `cargo build -p typ-rs && ./target/debug/typ`,
 `cargo test --workspace`, and so on.
+
+The terminal loop itself is checked by hand; see
+[`docs/smoke-test.md`](docs/smoke-test.md).
 
 The workspace has four crates:
 

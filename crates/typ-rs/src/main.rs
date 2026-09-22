@@ -1,9 +1,23 @@
+mod input;
+mod interactive;
+mod render;
+mod terminal;
+
+use std::io::IsTerminal;
+use std::process::ExitCode;
 use std::sync::LazyLock;
 
 use clap::Parser;
 use typ_rs_core::corpus::{CORPUS_VERSION, Corpus, ReferenceDistribution};
+use typ_rs_core::display::Palette;
+use typ_rs_core::metrics::{final_accuracy, gross_wpm};
+use typ_rs_core::prompt::Prompt;
+use typ_rs_core::session::{EndCondition, Outcome, SessionState};
 
 const PROMPT_WORDS: usize = 50;
+
+/// Narrower than this and no useful prompt can be shown.
+const MIN_COLUMNS: u16 = 20;
 
 static VERSION: LazyLock<String> = LazyLock::new(|| {
     format!(
@@ -21,15 +35,137 @@ static VERSION: LazyLock<String> = LazyLock::new(|| {
 #[command(name = "typ", version = VERSION.as_str())]
 struct Cli {}
 
-fn main() {
+fn main() -> ExitCode {
     let Cli {} = Cli::parse();
+
+    if let Err(message) = check_terminal() {
+        eprintln!("typ: {message}");
+        return ExitCode::FAILURE;
+    }
 
     let seed = getrandom::u64().expect("operating system randomness");
     let corpus = Corpus::bundled();
-    let prompt: Vec<&str> = ReferenceDistribution::new(corpus)
-        .seeded_sampler(seed)
-        .take(PROMPT_WORDS)
-        .map(|id| corpus.text(id))
-        .collect();
-    println!("{}", prompt.join(" "));
+    let prompt = Prompt::new(
+        ReferenceDistribution::new(corpus)
+            .seeded_sampler(seed)
+            .take(PROMPT_WORDS)
+            .map(|id| corpus.text(id)),
+    );
+    let palette = Palette::from_no_color(std::env::var("NO_COLOR").ok().as_deref());
+
+    let run = match interactive::run(prompt, EndCondition::AfterWords(PROMPT_WORDS), palette) {
+        Ok(run) => run,
+        Err(e) => {
+            eprintln!("typ: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    println!("{}", results(&run.state));
+    if std::env::var_os("TYP_DIAGNOSTICS").is_some_and(|v| !v.is_empty()) {
+        eprintln!("{}", render_diagnostics(&run.render_micros));
+    }
+    ExitCode::SUCCESS
+}
+
+/// A session needs a real terminal that is wide enough to show a prompt.
+fn check_terminal() -> Result<(), String> {
+    if !std::io::stdin().is_terminal() || !std::io::stdout().is_terminal() {
+        return Err("needs an interactive terminal".to_string());
+    }
+    let (columns, _) = crossterm::terminal::size()
+        .map_err(|e| format!("could not determine the terminal size: {e}"))?;
+    if columns < MIN_COLUMNS {
+        return Err(format!(
+            "needs a terminal at least {MIN_COLUMNS} columns wide; this one is {columns}"
+        ));
+    }
+    Ok(())
+}
+
+/// The line printed when a session ends. Speed is reported only for a
+/// completed session: a partial prompt has no meaningful WPM.
+fn results(state: &SessionState) -> String {
+    match state.outcome() {
+        Some(Outcome::Completed) => {
+            let wpm = gross_wpm(state).unwrap_or(0.0);
+            let accuracy = 100.0 * final_accuracy(state);
+            format!("{wpm:.0} wpm  {accuracy:.1}% accuracy")
+        }
+        _ => {
+            let words = state.words_completed();
+            let noun = if words == 1 { "word" } else { "words" };
+            format!("interrupted after {words} {noun}")
+        }
+    }
+}
+
+fn render_diagnostics(render_micros: &[u64]) -> String {
+    let batches = render_micros.len();
+    let total: u64 = render_micros.iter().sum();
+    let mean = if batches == 0 {
+        0
+    } else {
+        total / batches as u64
+    };
+    let max = render_micros.iter().copied().max().unwrap_or(0);
+    format!("render: {batches} batches, mean {mean} µs, max {max} µs")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use typ_rs_core::session::{Input, Key};
+
+    fn run(prompt: &str, script: &str) -> SessionState {
+        let mut state = SessionState::new(
+            Prompt::new(prompt.split(' ')),
+            EndCondition::AfterWords(usize::MAX),
+        );
+        for (i, c) in script.chars().enumerate() {
+            let key = if c == '⎋' {
+                Key::Interrupt
+            } else {
+                Key::Char(c)
+            };
+            // One keystroke every 100 ms.
+            state.apply_event(Input::new(i as u64 * 100_000, key));
+        }
+        state
+    }
+
+    #[test]
+    fn a_completed_session_reports_gross_wpm_and_final_accuracy() {
+        // 6 final characters ("cat dg") over 0.6 s is 120 wpm; "dg" for
+        // "dog" leaves 4 of 6 target characters correct.
+        let state = run("cat dog", "cat dg ");
+        assert_eq!(results(&state), "120 wpm  66.7% accuracy");
+    }
+
+    #[test]
+    fn an_interrupted_session_reports_words_completed_and_no_speed() {
+        assert_eq!(
+            results(&run("cat dog fox", "cat do⎋")),
+            "interrupted after 1 word"
+        );
+        assert_eq!(
+            results(&run("cat dog fox", "cat dog ⎋")),
+            "interrupted after 2 words"
+        );
+        assert_eq!(
+            results(&run("cat dog fox", "⎋")),
+            "interrupted after 0 words"
+        );
+    }
+
+    #[test]
+    fn render_diagnostics_summarise_the_batches() {
+        assert_eq!(
+            render_diagnostics(&[100, 300, 200]),
+            "render: 3 batches, mean 200 µs, max 300 µs"
+        );
+        assert_eq!(
+            render_diagnostics(&[]),
+            "render: 0 batches, mean 0 µs, max 0 µs"
+        );
+    }
 }
