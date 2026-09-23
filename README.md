@@ -15,6 +15,15 @@ final accuracy, and consistency. Every session is saved, including
 interrupted ones, and the prompt for your next session is composed as soon as
 the current one ends.
 
+`typ config words 30` changes the session length (10 to 200 words) for every
+run to come; `typ --words 30` changes it for one run. Settings take effect on
+the very next run: a prompt composed ahead for other settings is replaced on
+the spot. Statistics live in profiles, one per typing condition, so a second
+keyboard layout gets its own history: `typ config profile laptop` switches to
+a profile (creating it on first use), `typ --profile laptop` uses one for a
+single run, and `typ config layout` shows or sets a profile's layout while
+nothing has been typed on it yet. Only `qwerty` exists so far.
+
 After each session `typ` updates decaying statistics for every character,
 bigram, and trigram you typed (space counts as an ordinary character, so the
 start and end of words are patterns too), normalised for your usual speed and
@@ -32,6 +41,9 @@ on top of this.
 ```
 $ typ --version
 $ typ
+$ typ --words 30 --profile laptop
+$ typ config words 30
+$ typ config profile laptop
 $ typ stats
 $ typ rebuild
 $ typ replay 12

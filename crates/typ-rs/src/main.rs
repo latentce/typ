@@ -10,15 +10,13 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 use std::sync::LazyLock;
 
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
 use typ_rs_core::analysis::analyze;
 use typ_rs_core::compose;
 use typ_rs_core::corpus::{CORPUS_VERSION, Corpus};
 use typ_rs_core::display::Palette;
 use typ_rs_core::session::{EndCondition, SEMANTICS_VERSION};
-use typ_rs_store::{DEFAULT_PROFILE, SessionId, SessionStart, Store, unix_now};
-
-const PROMPT_WORDS: usize = 50;
+use typ_rs_store::{Profile, SessionId, SessionStart, Store, parse_words, unix_now};
 
 /// Narrower than this and no useful prompt can be shown.
 const MIN_COLUMNS: u16 = 20;
@@ -43,6 +41,13 @@ static VERSION: LazyLock<String> = LazyLock::new(|| {
 #[derive(Parser)]
 #[command(name = "typ", version = VERSION.as_str())]
 struct Cli {
+    /// Words in this session, instead of the profile's setting
+    #[arg(long, value_name = "N")]
+    words: Option<String>,
+    /// Use this profile for this run, instead of the active one; created
+    /// if it does not exist
+    #[arg(long, global = true, value_name = "NAME")]
+    profile: Option<String>,
     #[command(subcommand)]
     command: Option<Command>,
 }
@@ -52,6 +57,12 @@ enum Command {
     /// List recent completed sessions and the patterns you are slowest and
     /// most error-prone on
     Stats,
+    /// Show a setting, or set it for every run to come
+    Config {
+        key: SettingKey,
+        /// The new value; omit it to show the current one
+        value: Option<String>,
+    },
     /// Recompute every statistic from the stored sessions
     Rebuild,
     /// Show how a stored session was interpreted: every word's first
@@ -62,11 +73,28 @@ enum Command {
     },
 }
 
+#[derive(Clone, Copy, ValueEnum)]
+enum SettingKey {
+    /// Words per session, 10 to 200
+    Words,
+    /// The profile's keyboard layout; fixed once a session has been typed
+    /// on the profile
+    Layout,
+    /// The profile used when --profile is not given; created if new
+    Profile,
+}
+
 fn main() -> ExitCode {
     let cli = Cli::parse();
+    let profile = cli.profile.as_deref();
     let outcome = match cli.command {
-        None => session(),
-        Some(Command::Stats) => stats(),
+        None => session(cli.words.as_deref(), profile),
+        Some(_) if cli.words.is_some() => Err("--words applies only to a session".into()),
+        Some(Command::Stats) => stats(profile),
+        Some(Command::Config { key, value }) => config(profile, key, value),
+        Some(Command::Rebuild | Command::Replay { .. }) if profile.is_some() => {
+            Err("--profile applies only to a session, stats, or config".into())
+        }
         Some(Command::Rebuild) => rebuild(),
         Some(Command::Replay { session_id }) => replay(session_id),
     };
@@ -82,17 +110,29 @@ fn main() -> ExitCode {
 /// Runs one session: the row is written before raw mode is entered and the
 /// events are saved after it is left, so the database is never touched while
 /// the user types. Afterwards the session is applied to the profile's
-/// pattern statistics and everything is saved in one transaction.
-fn session() -> Result<(), Box<dyn Error>> {
+/// pattern statistics and everything is saved in one transaction. The prompt
+/// composed ahead for the next run is sized for the stored setting, not for
+/// a `--words` override, which touches this session only. The override is
+/// parsed here rather than by clap so that a bad value is refused on one
+/// line, as `typ config words` refuses it.
+fn session(words: Option<&str>, profile: Option<&str>) -> Result<(), Box<dyn Error>> {
+    let words = words.map(parse_words).transpose()?;
     check_terminal()?;
     let mut store = open_store()?;
-    let profile = store.profile(DEFAULT_PROFILE)?;
+    let profile = open_profile(&mut store, profile)?;
+    let stored_words = store.words(&profile)?;
+    let words = words.unwrap_or(stored_words);
     let corpus = Corpus::bundled();
     let seed = getrandom::u64()?;
     let fallback_seed = getrandom::u64()?;
     let started_at = unix_now();
-    let started = store.start_session(&profile, SessionStart { started_at, seed }, || {
-        compose::frequency_weighted(corpus, PROMPT_WORDS, fallback_seed)
+    let start = SessionStart {
+        started_at,
+        seed,
+        word_count: words,
+    };
+    let started = store.start_session(&profile, start, || {
+        compose::frequency_weighted(corpus, words, fallback_seed)
     })?;
     let end = EndCondition::AfterWords(started.prompt.word_count());
     let palette = Palette::from_no_color(std::env::var("NO_COLOR").ok().as_deref());
@@ -103,7 +143,7 @@ fn session() -> Result<(), Box<dyn Error>> {
     // persistence failure still shows them, followed by the error. The
     // results come from the same analysis the statistics were built from,
     // unless the model could not even be loaded.
-    let next = compose::frequency_weighted(corpus, PROMPT_WORDS, seed);
+    let next = compose::frequency_weighted(corpus, stored_words, seed);
     let (results, saved) = match store.model(&profile) {
         Ok(mut model) => {
             let update = model.apply_session(&run.state, started_at, store.config());
@@ -124,13 +164,34 @@ fn session() -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
-fn stats() -> Result<(), Box<dyn Error>> {
-    let store = open_store()?;
-    let profile = store.profile(DEFAULT_PROFILE)?;
+fn stats(profile: Option<&str>) -> Result<(), Box<dyn Error>> {
+    let mut store = open_store()?;
+    let profile = open_profile(&mut store, profile)?;
     let sessions = store.completed_sessions(&profile, LISTED_SESSIONS)?;
     print!("{}", report::session_listing(&sessions));
     let model = store.model(&profile)?;
     print!("{}", report::pattern_summary(&model, store.config()));
+    Ok(())
+}
+
+/// Shows a setting's current value, or sets it. `words` and `layout` are
+/// the profile's (the active one, or `--profile`); `profile` is the active
+/// profile itself, which `--profile` does not touch.
+fn config(
+    profile: Option<&str>,
+    key: SettingKey,
+    value: Option<String>,
+) -> Result<(), Box<dyn Error>> {
+    let mut store = open_store()?;
+    let profile = open_profile(&mut store, profile)?;
+    match (key, value) {
+        (SettingKey::Words, None) => println!("{}", store.words(&profile)?),
+        (SettingKey::Words, Some(value)) => store.set_words(&profile, parse_words(&value)?)?,
+        (SettingKey::Layout, None) => println!("{}", profile.layout),
+        (SettingKey::Layout, Some(value)) => store.set_layout(&profile, &value)?,
+        (SettingKey::Profile, None) => println!("{}", store.active_profile()?),
+        (SettingKey::Profile, Some(value)) => store.set_active_profile(&value)?,
+    }
     Ok(())
 }
 
@@ -186,6 +247,16 @@ fn open_store() -> Result<Store, Box<dyn Error>> {
         .map_err(|e| format!("could not create {}: {e}", dir.display()))?;
     let path = dir.join(DATABASE_FILE);
     Store::open(&path).map_err(|e| format!("could not open {}: {e}", path.display()).into())
+}
+
+/// The profile this run works with: the one named by `--profile`, otherwise
+/// the active one. Either is created on first use.
+fn open_profile(store: &mut Store, name: Option<&str>) -> Result<Profile, Box<dyn Error>> {
+    let name = match name {
+        Some(name) => name.to_string(),
+        None => store.active_profile()?,
+    };
+    Ok(store.profile_or_create(&name)?)
 }
 
 /// `$TYP_DATA_DIR` if set, otherwise `typ` under the platform's data

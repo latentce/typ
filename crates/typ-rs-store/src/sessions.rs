@@ -12,7 +12,8 @@ use typ_rs_core::session::{
     EndCondition, EventFlags, EventKind, InputEvent, Outcome, SEMANTICS_VERSION, SessionState,
 };
 
-use crate::{Error, Profile, Result, Store, model, prompts};
+use crate::prompts::{self, Context};
+use crate::{Error, Profile, Result, Store, model};
 
 /// A session's row id, the handle a user names a stored session by.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -46,6 +47,10 @@ pub struct SessionStart {
     /// Seeds the randomness drawn at this session's end when the next prompt
     /// is composed.
     pub seed: u64,
+    /// How many words the session is to have: the profile's setting, or an
+    /// override for this session alone. A prompt composed ahead with another
+    /// length is not shown.
+    pub word_count: usize,
 }
 
 /// A session whose row exists and whose prompt is ready to be typed.
@@ -91,11 +96,15 @@ impl StoredSession {
 
 impl Store {
     /// Records that a session is about to start and returns its prompt: the
-    /// one composed ahead for the profile if there is one (it is consumed, so
-    /// it is never shown twice), otherwise the one `compose` produces. The row
-    /// is committed with status `interrupted` before this returns, so a
-    /// session the process dies in is still recorded. The store's config is
-    /// recorded with the row as what the session ran under.
+    /// one composed ahead for the profile if there is one and it was
+    /// composed for a session like this one (`start.word_count` words, this
+    /// corpus and model version, the profile's layout), otherwise the one
+    /// `compose` produces, which must have `start.word_count` words. A
+    /// waiting prompt is consumed either way, so it is never shown twice and
+    /// a stale one is gone. The row is committed with status `interrupted`
+    /// before this returns, so a session the process dies in is still
+    /// recorded. The store's config is recorded with the row as what the
+    /// session ran under.
     pub fn start_session(
         &mut self,
         profile: &Profile,
@@ -105,7 +114,8 @@ impl Store {
         let tx = self
             .conn
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let (prompt_id, prompt) = match prompts::take_next(&tx, profile.id)? {
+        let wanted = Context::current(start.word_count, &profile.layout);
+        let (prompt_id, prompt) = match prompts::take_next(&tx, profile.id, &wanted)? {
             Some(waiting) => waiting,
             None => {
                 let prompt = compose();
@@ -139,8 +149,9 @@ impl Store {
     /// from the state's outcome, writes the pattern statistics the session
     /// changed (`model` is the profile's model with the session applied),
     /// marks the session applied under the current model version, and stores
-    /// `next_prompt` as the prompt for the profile's next session. A session
-    /// can end only once.
+    /// `next_prompt` as the prompt for the profile's next session, recorded
+    /// as composed for its own length, this corpus and model version, and
+    /// the profile's layout. A session can end only once.
     pub fn finish_session(
         &mut self,
         id: SessionId,
@@ -152,11 +163,13 @@ impl Store {
         let tx = self
             .conn
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let (profile_id, already_ended): (i64, Option<i64>) = tx
+        let (profile_id, layout, already_ended): (i64, String, Option<i64>) = tx
             .query_row(
-                "SELECT profile_id, ended_at FROM sessions WHERE id = ?1",
+                "SELECT s.profile_id, p.layout, s.ended_at
+                 FROM sessions s JOIN profiles p ON p.id = s.profile_id
+                 WHERE s.id = ?1",
                 [id.0],
-                |row| Ok((row.get(0)?, row.get(1)?)),
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
             )
             .optional()?
             .ok_or(Error::NoSuchSession(id))?;
@@ -174,7 +187,8 @@ impl Store {
         model::write(&tx, profile_id, model.dirty())?;
 
         let next_id = prompts::insert(&tx, profile_id, &next_prompt, ended_at)?;
-        prompts::set_next(&tx, profile_id, next_id)?;
+        let context = Context::current(next_prompt.word_count(), &layout);
+        prompts::set_next(&tx, profile_id, next_id, &context)?;
         tx.commit()?;
         Ok(())
     }

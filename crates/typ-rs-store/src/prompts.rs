@@ -2,9 +2,34 @@
 
 use rusqlite::{Connection, OptionalExtension, params};
 use typ_rs_core::corpus::CORPUS_VERSION;
+use typ_rs_core::model::MODEL_VERSION;
 use typ_rs_core::prompt::Prompt;
 
 use crate::{Error, Result};
+
+/// What a prompt was composed for. A prompt composed ahead is shown only to
+/// a session with the same context; a changed setting, a new corpus, a new
+/// model version, or another layout makes it stale.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Context {
+    pub word_count: usize,
+    pub corpus_version: u32,
+    pub model_version: u32,
+    pub layout: String,
+}
+
+impl Context {
+    /// The context of a prompt composed by this binary for the given
+    /// settings.
+    pub(crate) fn current(word_count: usize, layout: &str) -> Context {
+        Context {
+            word_count,
+            corpus_version: CORPUS_VERSION,
+            model_version: MODEL_VERSION,
+            layout: layout.to_string(),
+        }
+    }
+}
 
 /// Inserts a prompt with its words. Every word of a frequency-weighted prompt
 /// is a probe: nothing was chosen to expose a target.
@@ -47,27 +72,70 @@ pub(crate) fn load(conn: &Connection, prompt_id: i64) -> Result<Prompt> {
     Ok(Prompt::new(words))
 }
 
-/// Removes and returns the prompt composed for the profile's next session,
-/// if one is waiting.
-pub(crate) fn take_next(conn: &Connection, profile_id: i64) -> Result<Option<(i64, Prompt)>> {
-    let prompt_id: Option<i64> = conn
+/// Removes the prompt composed for the profile's next session, if one is
+/// waiting, and returns it if it was composed for `wanted`. A prompt
+/// composed for another context is discarded: the caller composes afresh.
+pub(crate) fn take_next(
+    conn: &Connection,
+    profile_id: i64,
+    wanted: &Context,
+) -> Result<Option<(i64, Prompt)>> {
+    let waiting: Option<(i64, i64, u32, u32, String)> = conn
         .query_row(
-            "DELETE FROM next_prompt WHERE profile_id = ?1 RETURNING prompt_id",
+            "DELETE FROM next_prompt WHERE profile_id = ?1
+             RETURNING prompt_id, word_count, corpus_version, model_version, layout",
             [profile_id],
-            |row| row.get(0),
+            |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                ))
+            },
         )
         .optional()?;
-    match prompt_id {
-        Some(id) => Ok(Some((id, load(conn, id)?))),
-        None => Ok(None),
+    let Some((id, word_count, corpus_version, model_version, layout)) = waiting else {
+        return Ok(None);
+    };
+    let composed_for = Context {
+        word_count: usize::try_from(word_count).map_err(|_| {
+            Error::Corrupt(format!("next prompt word_count {word_count} is negative"))
+        })?,
+        corpus_version,
+        model_version,
+        layout,
+    };
+    if composed_for == *wanted {
+        Ok(Some((id, load(conn, id)?)))
+    } else {
+        Ok(None)
     }
 }
 
-pub(crate) fn set_next(conn: &Connection, profile_id: i64, prompt_id: i64) -> Result<()> {
+pub(crate) fn set_next(
+    conn: &Connection,
+    profile_id: i64,
+    prompt_id: i64,
+    context: &Context,
+) -> Result<()> {
     conn.execute(
-        "INSERT INTO next_prompt (profile_id, prompt_id) VALUES (?1, ?2)
-         ON CONFLICT (profile_id) DO UPDATE SET prompt_id = excluded.prompt_id",
-        params![profile_id, prompt_id],
+        "INSERT INTO next_prompt
+             (profile_id, prompt_id, word_count, corpus_version, model_version, layout)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+         ON CONFLICT (profile_id) DO UPDATE SET
+             prompt_id = excluded.prompt_id, word_count = excluded.word_count,
+             corpus_version = excluded.corpus_version,
+             model_version = excluded.model_version, layout = excluded.layout",
+        params![
+            profile_id,
+            prompt_id,
+            context.word_count as i64,
+            context.corpus_version,
+            context.model_version,
+            context.layout
+        ],
     )?;
     Ok(())
 }

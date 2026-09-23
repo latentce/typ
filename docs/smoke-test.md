@@ -60,6 +60,14 @@ apart from your own history.
 14. **Rebuild.** `just run stats > /tmp/before`, then `just run rebuild`
     (it reports how many sessions it reapplied) and `just run stats` again:
     the output is identical to `/tmp/before`.
+15. **Settings.** `just run --words 12`: the prompt has 12 words; interrupt
+    it. `just run config words 15`, then `just run`: the prompt has 15
+    words even though one was composed ahead at 50; interrupt it. `just run
+    config words 5` refuses on one line and `just run config words` still
+    prints `15`. `just run --profile smoke`: a 50-word prompt (the new
+    profile's default); interrupt it, then `just run stats --profile smoke`
+    shows nothing while `just run stats` still lists your sessions, and
+    `just run config profile` still prints `default`.
 
 Setting `TYP_DIAGNOSTICS=1` prints the render timing per input batch (count,
 mean, max) to stderr after the results, for checking that painting stays well

@@ -1,6 +1,7 @@
-//! Persistence for `typ`: profiles, prompts, sessions, and input events in a
-//! local SQLite file, plus the caches derived from them: the pattern
-//! statistics and the prompt composed ahead for the next session.
+//! Persistence for `typ`: profiles and their settings, prompts, sessions,
+//! and input events in a local SQLite file, plus the caches derived from
+//! them: the pattern statistics and the prompt composed ahead for the next
+//! session.
 //!
 //! The database is opened once per process. Sessions, prompts, and input
 //! events are the source of truth: a session's row is written before it
@@ -13,20 +14,20 @@ mod migrations;
 mod model;
 mod prompts;
 mod sessions;
+mod settings;
 
 use std::fmt;
 use std::path::Path;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use rusqlite::{Connection, OptionalExtension, params};
+use rusqlite::{Connection, OptionalExtension};
 use typ_rs_core::model::SchedulerConfig;
 
 pub use sessions::{SessionId, SessionStart, StartedSession, StoredSession};
+pub use settings::{DEFAULT_WORDS, WORDS_RANGE, parse_words};
 
-/// The profile every session belongs to until others exist.
+/// The profile every session belongs to until the user names another.
 pub const DEFAULT_PROFILE: &str = "default";
-
-const DEFAULT_LAYOUT: &str = "qwerty";
 
 /// The only session mode: a fixed number of words.
 const WORDS_MODE: &str = "words";
@@ -48,6 +49,9 @@ pub enum Error {
     NoSuchSession(SessionId),
     /// The session has already ended; its rows are never changed again.
     SessionAlreadyEnded(SessionId),
+    /// A setting was given a value it cannot take, or a change it does not
+    /// allow; nothing was changed. The message is complete on its own.
+    InvalidSetting(String),
     /// A row that cannot be interpreted, such as a prompt with no words.
     Corrupt(String),
 }
@@ -65,6 +69,7 @@ impl fmt::Display for Error {
             Error::NoSuchProfile(name) => write!(f, "no profile named {name:?}"),
             Error::NoSuchSession(id) => write!(f, "no session {id}"),
             Error::SessionAlreadyEnded(id) => write!(f, "session {id} has already ended"),
+            Error::InvalidSetting(message) => f.write_str(message),
             Error::Corrupt(what) => write!(f, "corrupt database: {what}"),
         }
     }
@@ -85,11 +90,13 @@ impl From<rusqlite::Error> for Error {
     }
 }
 
-/// An isolated set of statistics for one typing condition.
+/// An isolated set of statistics for one typing condition: one layout and
+/// one session mode.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Profile {
     id: i64,
     pub name: String,
+    /// The layout the profile is bound to; see [`Store::set_layout`].
     pub layout: String,
     pub mode: String,
 }
@@ -114,14 +121,11 @@ impl Store {
 
         let now = unix_now();
         migrations::run(&mut conn, now)?;
-        conn.execute(
-            "INSERT OR IGNORE INTO profiles (name, layout, mode, created_at) VALUES (?1, ?2, ?3, ?4)",
-            params![DEFAULT_PROFILE, DEFAULT_LAYOUT, WORDS_MODE, now],
-        )?;
         let mut store = Store {
             conn,
             config: SchedulerConfig::default(),
         };
+        store.profile_or_create(DEFAULT_PROFILE)?;
         store.reconcile()?;
         Ok(store)
     }

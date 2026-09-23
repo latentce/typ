@@ -48,6 +48,7 @@ fn store_session(store: &mut Store, started_at: i64, prompt: &str, script: &str)
             SessionStart {
                 started_at,
                 seed: 1,
+                word_count: words().word_count(),
             },
             words,
         )
@@ -256,4 +257,149 @@ fn replay_of_an_unknown_session_fails_with_one_line() {
     assert!(!run.ok);
     assert_eq!(run.stdout, "");
     assert_eq!(run.stderr, "typ: no session 7\n");
+}
+
+// --- Configuration -----------------------------------------------------------
+
+/// Runs `typ` expecting success with nothing on stderr; returns stdout.
+fn ok(data_dir: &Path, args: &[&str]) -> String {
+    let run = typ_in(data_dir, args);
+    assert!(run.ok, "{args:?}: {}", run.stderr);
+    assert_eq!(run.stderr, "", "{args:?}");
+    run.stdout
+}
+
+/// Runs `typ` expecting failure with one line on stderr and nothing on
+/// stdout; returns that line.
+fn one_line_error(data_dir: &Path, args: &[&str]) -> String {
+    let run = typ_in(data_dir, args);
+    assert!(!run.ok, "{args:?}: {}", run.stdout);
+    assert_eq!(run.stdout, "", "{args:?}");
+    assert_eq!(run.stderr.lines().count(), 1, "{args:?}: {:?}", run.stderr);
+    run.stderr
+}
+
+#[test]
+fn config_shows_the_defaults_on_a_fresh_data_directory() {
+    let dir = tempfile::tempdir().unwrap();
+    assert_eq!(ok(dir.path(), &["config", "words"]), "50\n");
+    assert_eq!(ok(dir.path(), &["config", "layout"]), "qwerty\n");
+    assert_eq!(ok(dir.path(), &["config", "profile"]), "default\n");
+}
+
+#[test]
+fn config_sets_a_value_silently_and_reads_it_back() {
+    let dir = tempfile::tempdir().unwrap();
+    assert_eq!(ok(dir.path(), &["config", "words", "30"]), "");
+    assert_eq!(ok(dir.path(), &["config", "words"]), "30\n");
+    assert_eq!(ok(dir.path(), &["config", "layout", "qwerty"]), "");
+    assert_eq!(ok(dir.path(), &["config", "layout"]), "qwerty\n");
+    assert_eq!(ok(dir.path(), &["config", "profile", "alt"]), "");
+    assert_eq!(ok(dir.path(), &["config", "profile"]), "alt\n");
+}
+
+#[test]
+fn config_rejects_invalid_values_with_one_line_and_changes_nothing() {
+    let dir = tempfile::tempdir().unwrap();
+    ok(dir.path(), &["config", "words", "30"]);
+
+    for bad in ["5", "201", "abc", "30.0"] {
+        let line = one_line_error(dir.path(), &["config", "words", bad]);
+        assert!(line.starts_with("typ: "), "{line}");
+        assert!(line.contains("10") && line.contains("200"), "{line}");
+        assert!(line.contains(bad), "{line}");
+    }
+    let line = one_line_error(dir.path(), &["config", "layout", "dvorak"]);
+    assert!(line.contains("dvorak") && line.contains("qwerty"), "{line}");
+    let line = one_line_error(dir.path(), &["config", "profile", "my profile"]);
+    assert!(line.contains("my profile"), "{line}");
+
+    assert_eq!(ok(dir.path(), &["config", "words"]), "30\n");
+    assert_eq!(ok(dir.path(), &["config", "layout"]), "qwerty\n");
+    assert_eq!(ok(dir.path(), &["config", "profile"]), "default\n");
+}
+
+#[test]
+fn an_unknown_setting_fails() {
+    let run = typ(&["config", "colour"]);
+    assert!(!run.ok);
+    assert!(run.stderr.contains("colour"), "{}", run.stderr);
+}
+
+#[test]
+fn switching_profile_switches_whose_settings_and_sessions_are_shown() {
+    let dir = tempfile::tempdir().unwrap();
+    {
+        let mut store = Store::open(&dir.path().join("typ.db")).unwrap();
+        store_session(&mut store, 1_705_392_000, "cat dog", "cat dog");
+    }
+    ok(dir.path(), &["config", "words", "30"]);
+    assert!(ok(dir.path(), &["stats"]).starts_with("   1  2024-01-16"));
+
+    ok(dir.path(), &["config", "profile", "alt"]);
+    assert_eq!(ok(dir.path(), &["config", "words"]), "50\n");
+    assert_eq!(ok(dir.path(), &["stats"]), "no completed sessions yet\n");
+
+    ok(dir.path(), &["config", "profile", "default"]);
+    assert_eq!(ok(dir.path(), &["config", "words"]), "30\n");
+    assert!(ok(dir.path(), &["stats"]).starts_with("   1  2024-01-16"));
+}
+
+#[test]
+fn the_profile_flag_applies_to_one_run_and_does_not_change_the_active_profile() {
+    let dir = tempfile::tempdir().unwrap();
+    {
+        let mut store = Store::open(&dir.path().join("typ.db")).unwrap();
+        store_session(&mut store, 1_705_392_000, "cat dog", "cat dog");
+    }
+    ok(dir.path(), &["--profile", "alt", "config", "words", "30"]);
+    assert_eq!(ok(dir.path(), &["config", "profile"]), "default\n");
+    assert_eq!(ok(dir.path(), &["config", "words"]), "50\n");
+    assert_eq!(
+        ok(dir.path(), &["config", "words", "--profile", "alt"]),
+        "30\n"
+    );
+    assert_eq!(
+        ok(dir.path(), &["stats", "--profile", "alt"]),
+        "no completed sessions yet\n"
+    );
+    assert!(ok(dir.path(), &["stats"]).starts_with("   1  2024-01-16"));
+}
+
+#[test]
+fn the_words_flag_is_validated_and_only_applies_to_a_session() {
+    let dir = tempfile::tempdir().unwrap();
+    for bad in ["5", "abc"] {
+        let line = one_line_error(dir.path(), &["--words", bad]);
+        assert!(line.contains("10") && line.contains("200"), "{line}");
+        assert!(line.contains(bad), "{line}");
+    }
+    let line = one_line_error(dir.path(), &["--words", "20", "stats"]);
+    assert!(line.contains("--words"), "{line}");
+    assert!(!dir.path().join("typ.db").exists());
+}
+
+#[test]
+fn the_profile_flag_is_rejected_where_it_would_have_no_effect() {
+    let dir = tempfile::tempdir().unwrap();
+    for args in [
+        &["rebuild", "--profile", "alt"][..],
+        &["--profile", "alt", "replay", "1"][..],
+    ] {
+        let line = one_line_error(dir.path(), args);
+        assert!(line.contains("--profile"), "{args:?}: {line}");
+    }
+    assert!(!dir.path().join("typ.db").exists());
+}
+
+#[test]
+fn a_profile_is_created_the_first_time_it_is_named_whatever_the_command() {
+    let dir = tempfile::tempdir().unwrap();
+    ok(dir.path(), &["--profile", "a", "config", "profile"]);
+    ok(dir.path(), &["--profile", "b", "stats"]);
+    ok(dir.path(), &["--profile", "c", "config", "layout"]);
+    let db = Store::open(&dir.path().join("typ.db")).unwrap();
+    for name in ["a", "b", "c"] {
+        assert_eq!(db.profile(name).unwrap().layout, "qwerty", "{name}");
+    }
 }

@@ -4,6 +4,7 @@ pub mod analysis;
 pub mod compose;
 pub mod corpus;
 pub mod display;
+pub mod layout;
 pub mod metrics;
 pub mod model;
 pub mod prompt;

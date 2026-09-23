@@ -3,10 +3,13 @@ use std::path::Path;
 
 use rusqlite::Connection;
 use tempfile::TempDir;
+use typ_rs_core::corpus::CORPUS_VERSION;
 use typ_rs_core::model::{MODEL_VERSION, ModelState, SchedulerConfig};
 use typ_rs_core::prompt::Prompt;
 use typ_rs_core::session::{EndCondition, Input, Key, Outcome, SessionState};
-use typ_rs_store::{DEFAULT_PROFILE, Error, Profile, SessionId, SessionStart, Store};
+use typ_rs_store::{
+    DEFAULT_PROFILE, DEFAULT_WORDS, Error, Profile, SessionId, SessionStart, Store, parse_words,
+};
 
 const SOURCE_OF_TRUTH: &[&str] = &[
     "profiles",
@@ -36,10 +39,28 @@ fn prompt(words: &str) -> Prompt {
     Prompt::new(words.split(' '))
 }
 
+/// Starts a session wanting as many words as `fallback` has, so a waiting
+/// prompt of that length is shown and `fallback` composed otherwise.
 fn start(
     store: &mut Store,
     profile: &Profile,
     started_at: i64,
+    fallback: &str,
+) -> (SessionId, Prompt) {
+    start_with(
+        store,
+        profile,
+        started_at,
+        prompt(fallback).word_count(),
+        fallback,
+    )
+}
+
+fn start_with(
+    store: &mut Store,
+    profile: &Profile,
+    started_at: i64,
+    word_count: usize,
     fallback: &str,
 ) -> (SessionId, Prompt) {
     let started = store
@@ -48,6 +69,7 @@ fn start(
             SessionStart {
                 started_at,
                 seed: 42,
+                word_count,
             },
             || prompt(fallback),
         )
@@ -170,7 +192,7 @@ fn opening_an_empty_file_runs_the_migrations_and_creates_the_default_profile() {
         .unwrap()
         .collect::<Result<_, _>>()
         .unwrap();
-    assert_eq!(versions, vec![1, 2]);
+    assert_eq!(versions, vec![1, 2, 3]);
 
     let tables: Vec<String> = conn
         .prepare("SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name")
@@ -209,7 +231,7 @@ fn reopening_does_not_rerun_migrations_or_duplicate_the_default_profile() {
     let profiles: i64 = conn
         .query_row("SELECT count(*) FROM profiles", [], |r| r.get(0))
         .unwrap();
-    assert_eq!((migrations, profiles), (2, 1));
+    assert_eq!((migrations, profiles), (3, 1));
 }
 
 #[test]
@@ -312,7 +334,7 @@ fn an_interrupted_session_keeps_its_events_and_its_prompt_is_not_reshown() {
     assert_eq!(session.events.len(), 3);
     assert!(store.completed_sessions(&profile, 10).unwrap().is_empty());
 
-    let (_, shown) = start(&mut store, &profile, 2_000, "fallback");
+    let (_, shown) = start(&mut store, &profile, 2_000, "fallback words");
     assert_eq!(shown, prompt("fresh words"));
 }
 
@@ -336,6 +358,280 @@ fn the_precomposed_prompt_is_shown_once_and_then_the_fallback_is_used() {
     assert_eq!(second, prompt("composed ahead"));
     let (_, third) = start(&mut store, &profile, 4_000, "second fallback");
     assert_eq!(third, prompt("second fallback"));
+}
+
+// --- Settings and profiles ---------------------------------------------------
+
+#[test]
+fn settings_have_their_defaults_before_anything_is_set() {
+    let (_dir, path) = temp_db();
+    let (store, profile) = open(&path);
+    assert_eq!(store.active_profile().unwrap(), DEFAULT_PROFILE);
+    assert_eq!(store.words(&profile).unwrap(), DEFAULT_WORDS);
+    assert_eq!(profile.layout, "qwerty");
+    assert_eq!(profile.mode, "words");
+}
+
+#[test]
+fn words_round_trip_and_the_last_value_set_wins() {
+    let (_dir, path) = temp_db();
+    {
+        let (mut store, profile) = open(&path);
+        store.set_words(&profile, 30).unwrap();
+        store.set_words(&profile, 120).unwrap();
+    }
+    let (store, profile) = open(&path);
+    assert_eq!(store.words(&profile).unwrap(), 120);
+    let rows: i64 = sql_one(&path, "SELECT count(*) FROM settings");
+    assert_eq!(rows, 1);
+}
+
+#[test]
+fn words_outside_the_range_are_refused_and_leave_the_setting_unchanged() {
+    let (_dir, path) = temp_db();
+    let (mut store, profile) = open(&path);
+    store.set_words(&profile, 30).unwrap();
+    for bad in [0, 9, 201, usize::MAX] {
+        assert!(
+            matches!(
+                store.set_words(&profile, bad),
+                Err(Error::InvalidSetting(_))
+            ),
+            "{bad}"
+        );
+        assert_eq!(store.words(&profile).unwrap(), 30);
+    }
+    store.set_words(&profile, 10).unwrap();
+    store.set_words(&profile, 200).unwrap();
+    assert_eq!(store.words(&profile).unwrap(), 200);
+}
+
+#[test]
+fn parsing_words_accepts_only_whole_numbers_in_the_range() {
+    assert_eq!(parse_words("50").unwrap(), 50);
+    assert_eq!(parse_words("10").unwrap(), 10);
+    assert_eq!(parse_words("200").unwrap(), 200);
+    for bad in ["9", "201", "abc", "50.0", "-50", "", " 50"] {
+        let err = parse_words(bad).unwrap_err();
+        assert!(matches!(err, Error::InvalidSetting(_)), "{bad:?}: {err}");
+        assert!(err.to_string().contains("10"), "{bad:?}: {err}");
+        assert!(err.to_string().contains("200"), "{bad:?}: {err}");
+    }
+}
+
+#[test]
+fn a_corrupt_words_value_is_reported_not_used() {
+    let (_dir, path) = temp_db();
+    let (store, profile) = open(&path);
+    sql(
+        &path,
+        "INSERT INTO settings (profile_id, key, value) VALUES (1, 'words', 'lots')",
+    );
+    assert!(matches!(store.words(&profile), Err(Error::Corrupt(_))));
+}
+
+#[test]
+fn the_active_profile_round_trips_and_is_created_on_first_use() {
+    let (_dir, path) = temp_db();
+    {
+        let (mut store, _) = open(&path);
+        store.set_active_profile("alt").unwrap();
+    }
+    let (store, _) = open(&path);
+    assert_eq!(store.active_profile().unwrap(), "alt");
+    let alt = store.profile("alt").unwrap();
+    assert_eq!(alt.name, "alt");
+    assert_eq!(alt.layout, "qwerty");
+    assert_eq!(alt.mode, "words");
+    let created_at: i64 = sql_one(&path, "SELECT created_at FROM profiles WHERE name = 'alt'");
+    assert!(created_at > 0);
+    // The active profile is a setting of the whole database, not of a profile.
+    let scope: Option<i64> = sql_one(
+        &path,
+        "SELECT profile_id FROM settings WHERE key = 'profile'",
+    );
+    assert_eq!(scope, None);
+}
+
+#[test]
+fn profile_or_create_returns_the_existing_profile_or_a_new_one_once() {
+    let (_dir, path) = temp_db();
+    let (mut store, default) = open(&path);
+    assert_eq!(store.profile_or_create(DEFAULT_PROFILE).unwrap(), default);
+
+    let first = store.profile_or_create("alt").unwrap();
+    let again = store.profile_or_create("alt").unwrap();
+    assert_eq!(first, again);
+    assert_eq!(store.profile("alt").unwrap(), first);
+    let profiles: i64 = sql_one(&path, "SELECT count(*) FROM profiles");
+    assert_eq!(profiles, 2);
+}
+
+#[test]
+fn profile_names_are_plain_words() {
+    let (_dir, path) = temp_db();
+    let (mut store, _) = open(&path);
+    for bad in ["", "my profile", "a/b", "tab\there", "ünïcode"] {
+        let err = store.profile_or_create(bad).unwrap_err();
+        assert!(matches!(err, Error::InvalidSetting(_)), "{bad:?}: {err}");
+        let err = store.set_active_profile(bad).unwrap_err();
+        assert!(matches!(err, Error::InvalidSetting(_)), "{bad:?}: {err}");
+    }
+    assert_eq!(store.active_profile().unwrap(), DEFAULT_PROFILE);
+    let profiles: i64 = sql_one(&path, "SELECT count(*) FROM profiles");
+    assert_eq!(profiles, 1);
+
+    for good in ["Colemak", "layout-2024", "a.b_c", "x"] {
+        assert_eq!(store.profile_or_create(good).unwrap().name, good);
+    }
+}
+
+#[test]
+fn a_layout_can_change_only_until_a_session_has_been_typed_on_the_profile() {
+    let (_dir, path) = temp_db();
+    let (mut store, _) = open(&path);
+    let alt = store.profile_or_create("alt").unwrap();
+
+    store.set_layout(&alt, "qwerty").unwrap();
+    let err = store.set_layout(&alt, "dvorak").unwrap_err();
+    assert!(matches!(err, Error::InvalidSetting(_)), "{err}");
+    assert!(err.to_string().contains("qwerty"), "{err}");
+
+    // A session the process died in was never typed, so it does not bind.
+    start(&mut store, &alt, 1_000, "cat");
+    store.set_layout(&alt, "qwerty").unwrap();
+
+    type_session(&mut store, &alt, 2_000, "cat", "cat", "dog");
+    let err = store.set_layout(&alt, "dvorak").unwrap_err();
+    assert!(matches!(err, Error::InvalidSetting(_)), "{err}");
+    assert!(err.to_string().contains("alt"), "{err}");
+    assert!(err.to_string().contains("profile"), "{err}");
+    store.set_layout(&alt, "qwerty").unwrap();
+    assert_eq!(store.profile("alt").unwrap().layout, "qwerty");
+}
+
+#[test]
+fn settings_are_isolated_per_profile() {
+    let (_dir, path) = temp_db();
+    let (mut store, default) = open(&path);
+    let a = store.profile_or_create("a").unwrap();
+    let b = store.profile_or_create("b").unwrap();
+    store.set_words(&a, 30).unwrap();
+    store.set_words(&b, 150).unwrap();
+
+    assert_eq!(store.words(&a).unwrap(), 30);
+    assert_eq!(store.words(&b).unwrap(), 150);
+    assert_eq!(store.words(&default).unwrap(), DEFAULT_WORDS);
+}
+
+#[test]
+fn sessions_statistics_and_the_next_prompt_are_isolated_per_profile() {
+    let (_dir, path) = temp_db();
+    let (mut store, _) = open(&path);
+    let a = store.profile_or_create("a").unwrap();
+    let b = store.profile_or_create("b").unwrap();
+    let (a_id, _) = type_session(&mut store, &a, 1_000, "cat dog", "cat dog", "alpha next");
+    let (b_id, _) = type_session(&mut store, &b, 2_000, "fox owl", "fxx owl", "beta next");
+
+    let listed = |store: &Store, p: &Profile| -> Vec<SessionId> {
+        store
+            .completed_sessions(p, 10)
+            .unwrap()
+            .iter()
+            .map(|s| s.id)
+            .collect()
+    };
+    assert_eq!(listed(&store, &a), vec![a_id]);
+    assert_eq!(listed(&store, &b), vec![b_id]);
+
+    assert!(store.model(&a).unwrap().stats("cat").is_some());
+    assert!(store.model(&b).unwrap().stats("cat").is_none());
+    assert!(store.model(&b).unwrap().stats("fox").is_some());
+
+    let (_, shown_b) = start(&mut store, &b, 3_000, "fallback words");
+    assert_eq!(shown_b, prompt("beta next"));
+    let (_, shown_a) = start(&mut store, &a, 4_000, "fallback words");
+    assert_eq!(shown_a, prompt("alpha next"));
+}
+
+// --- The next prompt's generation context ------------------------------------
+
+#[test]
+fn the_next_prompt_records_what_it_was_composed_for() {
+    let (_dir, path) = temp_db();
+    let (mut store, profile) = open(&path);
+    type_session(&mut store, &profile, 1_000, "cat", "cat", "one two three");
+
+    let (words, corpus, model, layout): (i64, i64, i64, String) = Connection::open(&path)
+        .unwrap()
+        .query_row(
+            "SELECT word_count, corpus_version, model_version, layout FROM next_prompt",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+        )
+        .unwrap();
+    assert_eq!(words, 3);
+    assert_eq!(corpus, i64::from(CORPUS_VERSION));
+    assert_eq!(model, i64::from(MODEL_VERSION));
+    assert_eq!(layout, "qwerty");
+}
+
+/// Types one session so that a three-word prompt waits for the next, alters
+/// the waiting prompt's recorded context with `change` if given, and starts
+/// a session wanting `word_count` words. Returns the prompt shown and how
+/// many prompts are still waiting afterwards.
+fn start_after_context_change(change: Option<&str>, word_count: usize) -> (Prompt, i64) {
+    let (_dir, path) = temp_db();
+    let (mut store, profile) = open(&path);
+    type_session(&mut store, &profile, 1_000, "cat", "cat", "one two three");
+    if let Some(change) = change {
+        sql(&path, change);
+    }
+    let (_, shown) = start_with(&mut store, &profile, 2_000, word_count, "fresh fallback");
+    let waiting: i64 = sql_one(&path, "SELECT count(*) FROM next_prompt");
+    (shown, waiting)
+}
+
+#[test]
+fn a_waiting_prompt_whose_context_matches_is_shown() {
+    let (shown, waiting) = start_after_context_change(None, 3);
+    assert_eq!(shown, prompt("one two three"));
+    assert_eq!(waiting, 0);
+}
+
+#[test]
+fn a_waiting_prompt_is_replaced_when_the_word_count_differs() {
+    let (shown, waiting) = start_after_context_change(None, 2);
+    assert_eq!(shown, prompt("fresh fallback"));
+    assert_eq!(waiting, 0);
+}
+
+#[test]
+fn a_waiting_prompt_is_replaced_when_the_corpus_version_differs() {
+    let (shown, waiting) = start_after_context_change(
+        Some("UPDATE next_prompt SET corpus_version = corpus_version + 1"),
+        3,
+    );
+    assert_eq!(shown, prompt("fresh fallback"));
+    assert_eq!(waiting, 0);
+}
+
+#[test]
+fn a_waiting_prompt_is_replaced_when_the_model_version_differs() {
+    let (shown, waiting) = start_after_context_change(
+        Some("UPDATE next_prompt SET model_version = model_version + 1"),
+        3,
+    );
+    assert_eq!(shown, prompt("fresh fallback"));
+    assert_eq!(waiting, 0);
+}
+
+#[test]
+fn a_waiting_prompt_is_replaced_when_the_layout_differs() {
+    let (shown, waiting) =
+        start_after_context_change(Some("UPDATE next_prompt SET layout = 'dvorak'"), 3);
+    assert_eq!(shown, prompt("fresh fallback"));
+    assert_eq!(waiting, 0);
 }
 
 #[test]
