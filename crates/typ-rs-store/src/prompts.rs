@@ -1,9 +1,11 @@
-//! Prompt rows and the cached next prompt.
+//! Prompt rows, the patterns selected for them, and the cached next prompt.
 
 use rusqlite::{Connection, OptionalExtension, params};
+use typ_rs_core::compose::ComposedPrompt;
 use typ_rs_core::corpus::CORPUS_VERSION;
 use typ_rs_core::model::MODEL_VERSION;
 use typ_rs_core::prompt::Prompt;
+use typ_rs_core::scheduler::{SelectedTarget, TargetRole};
 
 use crate::{Error, Result};
 
@@ -31,12 +33,12 @@ impl Context {
     }
 }
 
-/// Inserts a prompt with its words. Every word of a frequency-weighted prompt
-/// is a probe: nothing was chosen to expose a target.
+/// Inserts a prompt with its words, each with its role and the targets it
+/// exposes, and every pattern selected for it.
 pub(crate) fn insert(
     conn: &Connection,
     profile_id: i64,
-    prompt: &Prompt,
+    composed: &ComposedPrompt,
     composed_at: i64,
 ) -> Result<i64> {
     conn.execute(
@@ -46,19 +48,57 @@ pub(crate) fn insert(
             profile_id,
             composed_at,
             CORPUS_VERSION,
-            prompt.word_count() as i64
+            composed.prompt.word_count() as i64
         ],
     )?;
     let prompt_id = conn.last_insert_rowid();
 
     let mut insert_word = conn.prepare_cached(
         "INSERT INTO prompt_words (prompt_id, word_index, word, role, exposed_targets)
-         VALUES (?1, ?2, ?3, 'probe', '[]')",
+         VALUES (?1, ?2, ?3, ?4, ?5)",
     )?;
-    for (index, word) in prompt.words().iter().enumerate() {
-        insert_word.execute(params![prompt_id, index as i64, word.as_ref()])?;
+    for (index, (word, meta)) in composed
+        .prompt
+        .words()
+        .iter()
+        .zip(&composed.words)
+        .enumerate()
+    {
+        insert_word.execute(params![
+            prompt_id,
+            index as i64,
+            word.as_ref(),
+            meta.role.name(),
+            json_strings(&meta.exposed_targets),
+        ])?;
+    }
+
+    let mut insert_target = conn.prepare_cached(
+        "INSERT INTO prompt_targets
+             (prompt_id, pattern, role, weakness_mean, weakness_sd, priority, planned_dose)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+    )?;
+    for t in &composed.targets {
+        insert_target.execute(params![
+            prompt_id,
+            t.pattern.as_ref(),
+            t.role.name(),
+            t.weakness_mean,
+            t.weakness_sd,
+            t.priority,
+            t.planned_dose as i64,
+        ])?;
     }
     Ok(prompt_id)
+}
+
+/// A JSON array of the given strings.
+fn json_strings(items: &[Box<str>]) -> String {
+    let quoted: Vec<String> = items
+        .iter()
+        .map(|s| format!("\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\"")))
+        .collect();
+    format!("[{}]", quoted.join(","))
 }
 
 pub(crate) fn load(conn: &Connection, prompt_id: i64) -> Result<Prompt> {
@@ -72,14 +112,65 @@ pub(crate) fn load(conn: &Connection, prompt_id: i64) -> Result<Prompt> {
     Ok(Prompt::new(words))
 }
 
+/// The patterns selected for a prompt, targets first in the order they
+/// were recorded.
+pub(crate) fn load_targets(conn: &Connection, prompt_id: i64) -> Result<Vec<SelectedTarget>> {
+    let mut stmt = conn.prepare_cached(
+        "SELECT pattern, role, weakness_mean, weakness_sd, priority, planned_dose
+         FROM prompt_targets WHERE prompt_id = ?1 ORDER BY rowid",
+    )?;
+    let rows = stmt.query_map([prompt_id], |row| {
+        Ok(TargetColumns {
+            pattern: row.get(0)?,
+            role: row.get(1)?,
+            weakness_mean: row.get(2)?,
+            weakness_sd: row.get(3)?,
+            priority: row.get(4)?,
+            planned_dose: row.get(5)?,
+        })
+    })?;
+    rows.map(|row| row?.decode()).collect()
+}
+
+/// A selected target as its columns come out of `prompt_targets` or
+/// `pattern_training_events`, before validation.
+pub(crate) struct TargetColumns {
+    pub pattern: String,
+    pub role: String,
+    pub weakness_mean: f64,
+    pub weakness_sd: f64,
+    pub priority: f64,
+    pub planned_dose: i64,
+}
+
+impl TargetColumns {
+    pub(crate) fn decode(self) -> Result<SelectedTarget> {
+        Ok(SelectedTarget {
+            pattern: self.pattern.into_boxed_str(),
+            role: TargetRole::from_name(&self.role)
+                .ok_or_else(|| Error::Corrupt(format!("unknown target role {:?}", self.role)))?,
+            weakness_mean: self.weakness_mean,
+            weakness_sd: self.weakness_sd,
+            priority: self.priority,
+            planned_dose: dose(self.planned_dose, "planned_dose")?,
+        })
+    }
+}
+
+/// A dose column, which can only be a count.
+pub(crate) fn dose(value: i64, column: &str) -> Result<usize> {
+    usize::try_from(value).map_err(|_| Error::Corrupt(format!("{column} {value} is negative")))
+}
+
 /// Removes the prompt composed for the profile's next session, if one is
-/// waiting, and returns it if it was composed for `wanted`. A prompt
-/// composed for another context is discarded: the caller composes afresh.
+/// waiting, and returns it with its targets if it was composed for
+/// `wanted`. A prompt composed for another context is discarded: the caller
+/// composes afresh.
 pub(crate) fn take_next(
     conn: &Connection,
     profile_id: i64,
     wanted: &Context,
-) -> Result<Option<(i64, Prompt)>> {
+) -> Result<Option<(i64, Prompt, Vec<SelectedTarget>)>> {
     let waiting: Option<(i64, i64, u32, u32, String)> = conn
         .query_row(
             "DELETE FROM next_prompt WHERE profile_id = ?1
@@ -108,10 +199,26 @@ pub(crate) fn take_next(
         layout,
     };
     if composed_for == *wanted {
-        Ok(Some((id, load(conn, id)?)))
+        Ok(Some((id, load(conn, id)?, load_targets(conn, id)?)))
     } else {
         Ok(None)
     }
+}
+
+/// The targets of the prompt waiting for the profile's next session;
+/// `None` when no prompt is waiting. The prompt stays waiting.
+pub(crate) fn next_targets(
+    conn: &Connection,
+    profile_id: i64,
+) -> Result<Option<Vec<SelectedTarget>>> {
+    let waiting: Option<i64> = conn
+        .query_row(
+            "SELECT prompt_id FROM next_prompt WHERE profile_id = ?1",
+            [profile_id],
+            |row| row.get(0),
+        )
+        .optional()?;
+    waiting.map(|id| load_targets(conn, id)).transpose()
 }
 
 pub(crate) fn set_next(

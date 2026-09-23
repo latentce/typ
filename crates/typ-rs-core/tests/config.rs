@@ -25,6 +25,42 @@ fn the_defaults_are_the_documented_starting_points() {
         (config.accuracy_gate_zero, config.accuracy_gate_full),
         (0.90, 0.98)
     );
+    assert_eq!(
+        (
+            config.weight_error,
+            config.weight_speed,
+            config.weight_inconsistency,
+            config.weight_hesitation
+        ),
+        (0.50, 0.25, 0.10, 0.15)
+    );
+    assert_eq!(config.slowness_share, 0.3);
+    assert_eq!(config.log_ratio_variance_cap, 1.0);
+    assert_eq!(config.importance_floor, 0.005);
+    assert_eq!(config.min_pattern_words, 5);
+    assert_eq!((config.candidates, config.max_targets), (8, 5));
+    assert_eq!(
+        (config.deferral_probability, config.deferral_window),
+        (0.25, 3)
+    );
+    assert_eq!(config.dose, 6);
+    assert_eq!(
+        (
+            config.plateau_min_sessions,
+            config.plateau_min_dose,
+            config.plateau_factor,
+            config.plateau_recovery_sessions
+        ),
+        (4, 20, 0.5, 10)
+    );
+    assert_eq!(
+        (
+            config.ramp_start_share,
+            config.ramp_full_share,
+            config.ramp_sessions
+        ),
+        (0.30, 0.80, 4)
+    );
 }
 
 #[test]
@@ -54,6 +90,26 @@ fn every_tunable_appears_by_name_in_the_json() {
         "context_ridge_lambda",
         "accuracy_gate_zero",
         "accuracy_gate_full",
+        "weight_error",
+        "weight_speed",
+        "weight_inconsistency",
+        "weight_hesitation",
+        "slowness_share",
+        "log_ratio_variance_cap",
+        "importance_floor",
+        "min_pattern_words",
+        "candidates",
+        "max_targets",
+        "deferral_probability",
+        "deferral_window",
+        "dose",
+        "plateau_min_sessions",
+        "plateau_min_dose",
+        "plateau_factor",
+        "plateau_recovery_sessions",
+        "ramp_start_share",
+        "ramp_full_share",
+        "ramp_sessions",
     ] {
         assert!(
             json.contains(&format!("\"{key}\":")),

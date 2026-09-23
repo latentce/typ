@@ -1,5 +1,6 @@
 //! The pattern statistics and context model caches: a profile's model as
-//! rows, and keeping it in step with the stored sessions.
+//! rows, and keeping every cache (the training events included) in step
+//! with the stored sessions.
 //!
 //! Every ended session is applied to its profile's model exactly once;
 //! `sessions.applied_model_version` records that it was, and under which
@@ -17,9 +18,10 @@ use typ_rs_core::corpus::Corpus;
 use typ_rs_core::layout::Layout;
 use typ_rs_core::model::context::{Coefficients, FEATURE_COUNT, Feature, Features};
 use typ_rs_core::model::{ContextModel, MODEL_VERSION, ModelState, PatternStats, SchedulerConfig};
+use typ_rs_core::scheduler::achieved_doses;
 
 use crate::sessions::load_sessions;
-use crate::{Error, Profile, Result, Store};
+use crate::{Error, Profile, Result, Store, training};
 
 impl Store {
     /// The profile's pattern statistics and context model as last written,
@@ -37,7 +39,8 @@ impl Store {
             tx.execute_batch(
                 "UPDATE sessions SET applied_model_version = NULL;
                  DELETE FROM pattern_stats;
-                 DELETE FROM context_model",
+                 DELETE FROM context_model;
+                 DELETE FROM pattern_training_events",
             )?;
             apply_unmarked(tx, &config)
         })
@@ -51,6 +54,7 @@ impl Store {
         let stale: bool = self.conn.query_row(
             "SELECT EXISTS (SELECT 1 FROM pattern_stats WHERE model_version <> ?1)
                  OR EXISTS (SELECT 1 FROM context_model WHERE model_version <> ?1)
+                 OR EXISTS (SELECT 1 FROM pattern_training_events WHERE model_version <> ?1)
                  OR EXISTS (SELECT 1 FROM sessions
                             WHERE applied_model_version IS NOT NULL
                               AND applied_model_version <> ?1)",
@@ -86,7 +90,8 @@ impl Store {
 }
 
 /// Applies every ended session without a marker, oldest first, to its
-/// profile's model, writes the models back, and sets the markers.
+/// profile's model, writes its training events, writes the models back,
+/// and sets the markers.
 fn apply_unmarked(conn: &Connection, config: &SchedulerConfig) -> Result<usize> {
     let pending = load_sessions(
         conn,
@@ -101,7 +106,14 @@ fn apply_unmarked(conn: &Connection, config: &SchedulerConfig) -> Result<usize> 
             Entry::Occupied(model) => model.into_mut(),
             Entry::Vacant(slot) => slot.insert(load(conn, session.profile_id)?),
         };
-        model.apply_session(&session.replay(), session.started_at, corpus, config);
+        let state = session.replay();
+        model.apply_session(&state, session.started_at, corpus, config);
+        training::write(
+            conn,
+            session.profile_id,
+            session.id,
+            &achieved_doses(&state, &session.targets),
+        )?;
         conn.execute(
             "UPDATE sessions SET applied_model_version = ?2 WHERE id = ?1",
             params![session.id.raw(), MODEL_VERSION],

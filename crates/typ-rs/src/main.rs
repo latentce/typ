@@ -15,6 +15,7 @@ use typ_rs_core::analysis::analyze;
 use typ_rs_core::compose;
 use typ_rs_core::corpus::{CORPUS_VERSION, Corpus};
 use typ_rs_core::display::Palette;
+use typ_rs_core::scheduler;
 use typ_rs_core::session::{EndCondition, SEMANTICS_VERSION};
 use typ_rs_store::{Profile, SessionId, SessionStart, Store, parse_words, unix_now};
 
@@ -54,8 +55,8 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
-    /// List recent completed sessions and the patterns you are slowest and
-    /// most error-prone on
+    /// List recent completed sessions, the patterns you are slowest, most
+    /// error-prone, and weakest on, and the candidates being held back
     Stats,
     /// Show a setting, or set it for every run to come
     Config {
@@ -110,11 +111,13 @@ fn main() -> ExitCode {
 /// Runs one session: the row is written before raw mode is entered and the
 /// events are saved after it is left, so the database is never touched while
 /// the user types. Afterwards the session is applied to the profile's
-/// pattern statistics and everything is saved in one transaction. The prompt
-/// composed ahead for the next run is sized for the stored setting, not for
-/// a `--words` override, which touches this session only. The override is
-/// parsed here rather than by clap so that a bad value is refused on one
-/// line, as `typ config words` refuses it.
+/// pattern statistics, what came of its targets is recorded, the next
+/// prompt is composed from the updated model, and everything is saved in
+/// one transaction. The prompt composed ahead for the next run is sized for
+/// the stored setting, not for a `--words` override, which touches this
+/// session only; a prompt composed on the spot because none fit is targeted
+/// all the same. The override is parsed here rather than by clap so that a
+/// bad value is refused on one line, as `typ config words` refuses it.
 fn session(words: Option<&str>, profile: Option<&str>) -> Result<(), Box<dyn Error>> {
     let words = words.map(parse_words).transpose()?;
     check_terminal()?;
@@ -123,6 +126,7 @@ fn session(words: Option<&str>, profile: Option<&str>) -> Result<(), Box<dyn Err
     let stored_words = store.words(&profile)?;
     let words = words.unwrap_or(stored_words);
     let corpus = Corpus::bundled();
+    let config = *store.config();
     let seed = getrandom::u64()?;
     let fallback_seed = getrandom::u64()?;
     let started_at = unix_now();
@@ -131,8 +135,18 @@ fn session(words: Option<&str>, profile: Option<&str>) -> Result<(), Box<dyn Err
         seed,
         word_count: words,
     };
+    let model_at_start = store.model(&profile)?;
+    let history_at_start = store.training_history(&profile)?;
     let started = store.start_session(&profile, start, || {
-        compose::frequency_weighted(corpus, words, fallback_seed)
+        compose::next_prompt(
+            &model_at_start,
+            corpus,
+            &config,
+            &history_at_start,
+            started_at,
+            words,
+            fallback_seed,
+        )
     })?;
     let end = EndCondition::AfterWords(started.prompt.word_count());
     let palette = Palette::from_no_color(std::env::var("NO_COLOR").ok().as_deref());
@@ -142,17 +156,33 @@ fn session(words: Option<&str>, profile: Option<&str>) -> Result<(), Box<dyn Err
     // Save before printing, but compute the results first so that a
     // persistence failure still shows them, followed by the error. The
     // results come from the same analysis the statistics were built from,
-    // unless the model could not even be loaded.
-    let next = compose::frequency_weighted(corpus, stored_words, seed);
-    let (results, saved) = match store.model(&profile) {
-        Ok(mut model) => {
-            let update = model.apply_session(&run.state, started_at, corpus, store.config());
-            let results = report::results(&run.state, &update.analysis.metrics);
-            let saved = store.finish_session(started.id, &run.state, &model, next, unix_now());
+    // unless the model could not even be loaded; then there is no next
+    // prompt to report either.
+    let ended_at = unix_now();
+    let loaded = store
+        .model(&profile)
+        .and_then(|model| Ok((model, store.training_history(&profile)?)));
+    let (results, saved) = match loaded {
+        Ok((mut model, mut history)) => {
+            let update = model.apply_session(&run.state, started_at, corpus, &config);
+            let events = scheduler::achieved_doses(&run.state, &started.targets);
+            history.record(&events, &config);
+            let next = compose::next_prompt(
+                &model,
+                corpus,
+                &config,
+                &history,
+                ended_at,
+                stored_words,
+                seed,
+            );
+            let results = report::results(&run.state, &update.analysis.metrics, Some(&next));
+            let saved =
+                store.finish_session(started.id, &run.state, &model, &events, &next, ended_at);
             (results, saved)
         }
         Err(e) => (
-            report::results(&run.state, &analyze(&run.state).metrics),
+            report::results(&run.state, &analyze(&run.state).metrics, None),
             Err(e),
         ),
     };
@@ -170,7 +200,11 @@ fn stats(profile: Option<&str>) -> Result<(), Box<dyn Error>> {
     let sessions = store.completed_sessions(&profile, LISTED_SESSIONS)?;
     print!("{}", report::session_listing(&sessions));
     let model = store.model(&profile)?;
-    print!("{}", report::pattern_summary(&model, store.config()));
+    let history = store.training_history_with_waiting_prompt(&profile)?;
+    print!(
+        "{}",
+        report::pattern_summary(&model, Corpus::bundled(), store.config(), &history)
+    );
     Ok(())
 }
 

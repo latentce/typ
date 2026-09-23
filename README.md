@@ -35,16 +35,39 @@ pattern's slowness is explained by its context: where it sits in its words,
 how long and how common they are, and what your fingers have to do to reach
 it on your layout (same finger, same hand, row change, key distance). That
 separates a pattern that is merely awkward on the keyboard from one you are
-personally weak on. `typ stats` lists your recent completed
+personally weak on.
+
+From your second session on, prompts start targeting your weaknesses. Each
+bigram and trigram gets a weakness score combining how much more often you
+get it wrong, how much slower you type it once its context is accounted for,
+how much its timing varies, and how often you stall before it, all relative
+to your own typing as a whole and weighted toward accuracy, and held with an
+uncertainty rather than as a bare number. The scheduler samples from those
+uncertainties, ranks patterns by importance in real text, and picks up to
+five targets for the next prompt, keeping one per back-off chain (never both
+`th` and `ath`). A quarter of the candidates are randomly held back for
+three sessions as controls, so that later versions can tell practice from
+noise, and one extra pattern is picked purely because the model is unsure
+about it. A target that has had plenty of practice without changing is
+backed off for a while. The targeted share of a prompt ramps from 30% on the
+second session to 80% by the fifth; the rest are probes drawn from a frozen
+frequency-weighted distribution so improvement can be measured on material
+the scheduler never touched. After each session the results block ends with
+`next:` and the patterns the next prompt will practise.
+
+`typ stats` lists your recent completed
 sessions with their ids, then the ten patterns you are slowest on relative to
-your baseline and the ten you most often get wrong, each with how much
-evidence is behind it. Every statistic is a cache: `typ rebuild` recomputes
+your baseline, the ten you most often get wrong, each with how much
+evidence is behind it, the ten weakest as mean ± uncertainty, and the
+candidates currently held back with the sessions remaining. Every statistic
+is a cache: `typ rebuild` recomputes
 all of them from your stored sessions, and an upgrade that changes the
 algorithm does so automatically. `typ replay <id>` shows how a stored session
 was interpreted: each word's first attempt, its own raw accuracy, and the
 patterns its errors count against, and which keystroke intervals count as
-clean motor evidence. The scheduler that turns these statistics into targeted
-prompts is being built on top of this.
+clean motor evidence. Word selection is still a simple picker (one word
+containing each target in turn); coverage-based selection and probe
+contamination tracking are being built on top of this.
 
 ```
 $ typ --version

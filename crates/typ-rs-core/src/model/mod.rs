@@ -12,7 +12,9 @@
 //! ([`ModelState::estimate`]) shrink each pattern toward its parent, so they
 //! are defined before a pattern has any evidence of its own, and separate
 //! what the pattern's physical and positional context explains
-//! ([`context`]) from what is left as the user's own weakness.
+//! ([`context`]) from what is left as the user's own weakness; the
+//! [`Weakness`] of a pattern combines that with its accuracy, consistency,
+//! and hesitation shortfalls into one distribution the scheduler samples.
 //!
 //! Everything here is a cache of the stored sessions: applying the same
 //! sessions in the same order to an empty model reproduces it exactly,
@@ -21,11 +23,13 @@
 
 mod config;
 pub mod context;
+mod weakness;
 
 use std::collections::{BTreeMap, BTreeSet};
 
 pub use config::{ConfigError, SchedulerConfig};
 pub use context::ContextModel;
+pub use weakness::{Weakness, WeaknessComponents};
 
 use crate::analysis::{HesitationThreshold, IntervalClass, SessionAnalysis, analyze_with, median};
 use crate::corpus::Corpus;
@@ -37,7 +41,7 @@ use context::{Aggregate, Coefficients, Features, slot_features};
 /// Identifies the analysis and scheduling algorithm. Bump whenever anything
 /// that feeds a cache changes; every cache is stamped with it and rebuilt
 /// from the stored sessions when it differs.
-pub const MODEL_VERSION: u32 = 2;
+pub const MODEL_VERSION: u32 = 3;
 
 /// The pattern text of the root of the chain: the user as a whole.
 pub const ROOT: &str = "";

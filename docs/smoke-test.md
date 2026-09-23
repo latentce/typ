@@ -29,8 +29,12 @@ apart from your own history.
    move.
 5. **Complete.** Type the prompt to the end. On the final character (or a
    space after the final word) a line with gross WPM, raw accuracy, final
-   accuracy, and consistency appears below the prompt and the shell prompt
-   returns. The whole prompt and the results stay in scrollback.
+   accuracy, and consistency appears below the prompt, then a `next:` line
+   naming the patterns the next prompt will practise (`next: none yet` only
+   if no session has completed yet, since the first prompt is a baseline),
+   and the shell prompt returns. The whole prompt and the results stay in
+   scrollback. Run `just run` again: a few words of the new prompt contain
+   the patterns named, and their share grows over the next few sessions.
 6. **`Ctrl-C`.** `just run`, type a word or two, press `Ctrl-C`. The session
    ends with `interrupted after N words` and the shell is back.
 7. **`Esc`.** Same as the previous step with `Esc`.
@@ -48,9 +52,11 @@ apart from your own history.
 12. **Stats during a session.** `just run` in one terminal and, while it is
     waiting for input, `just run stats` in another (with the same
     `TYP_DATA_DIR`). The listing shows the sessions completed above, most
-    recent first, followed by the slowest and most error-prone patterns so
-    far, and neither command disturbs the other. Finish or interrupt the
-    session: the next `just run` shows a different prompt.
+    recent first, followed by the slowest, most error-prone, and weakest
+    patterns so far (the last as `mean ± sd`) and, once the scheduler has
+    held some candidates back, `deferred candidates` with the sessions
+    remaining, and neither command disturbs the other. Finish or interrupt
+    the session: the next `just run` shows a different prompt.
 13. **Replay.** `just run replay N` with an id from the listing. The first
     lines repeat the results the session printed; below them every word
     shows its first attempt, its own raw accuracy, and the errors attributed

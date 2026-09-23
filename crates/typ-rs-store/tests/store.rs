@@ -1,12 +1,17 @@
 use std::collections::BTreeMap;
 use std::path::Path;
+use std::str::FromStr;
 
 use rusqlite::Connection;
 use tempfile::TempDir;
+use typ_rs_core::compose::{self, ComposedPrompt, ComposedWord, WordRole};
 use typ_rs_core::corpus::{CORPUS_VERSION, Corpus};
 use typ_rs_core::layout::Layout;
 use typ_rs_core::model::{MODEL_VERSION, ModelState, SchedulerConfig};
 use typ_rs_core::prompt::Prompt;
+use typ_rs_core::scheduler::{
+    self, SelectedTarget, TargetRole, TrainingEvent, TrainingHistory, achieved_doses,
+};
 use typ_rs_core::session::{EndCondition, Input, Key, Outcome, SessionState};
 use typ_rs_store::{
     DEFAULT_PROFILE, DEFAULT_WORDS, Error, Profile, SessionId, SessionStart, Store, parse_words,
@@ -22,7 +27,7 @@ const SOURCE_OF_TRUTH: &[&str] = &[
     "input_events",
 ];
 
-const CACHES: &[&str] = &["pattern_stats", "context_model"];
+const CACHES: &[&str] = &["pattern_stats", "context_model", "pattern_training_events"];
 
 fn temp_db() -> (TempDir, std::path::PathBuf) {
     let dir = tempfile::tempdir().unwrap();
@@ -38,6 +43,11 @@ fn open(path: &Path) -> (Store, Profile) {
 
 fn prompt(words: &str) -> Prompt {
     Prompt::new(words.split(' '))
+}
+
+/// A prompt of probes only, as the frequency-weighted composer makes.
+fn probes(words: &str) -> ComposedPrompt {
+    ComposedPrompt::probes(prompt(words))
 }
 
 /// Starts a session wanting as many words as `fallback` has, so a waiting
@@ -72,7 +82,7 @@ fn start_with(
                 seed: 42,
                 word_count,
             },
-            || prompt(fallback),
+            || probes(fallback),
         )
         .unwrap();
     (started.id, started.prompt)
@@ -102,7 +112,8 @@ fn typed(prompt: Prompt, script: &str) -> SessionState {
 }
 
 /// Ends a session the way the binary does: the model is loaded, the session
-/// applied to it, and the result handed to the store with the next prompt.
+/// applied to it, the achieved doses of the session's targets computed, and
+/// everything handed to the store with the next prompt.
 fn finish(
     store: &mut Store,
     profile: &Profile,
@@ -111,9 +122,22 @@ fn finish(
     state: &SessionState,
     next: &str,
 ) -> typ_rs_store::Result<()> {
+    finish_with(store, profile, id, started_at, state, probes(next))
+}
+
+fn finish_with(
+    store: &mut Store,
+    profile: &Profile,
+    id: SessionId,
+    started_at: i64,
+    state: &SessionState,
+    next: ComposedPrompt,
+) -> typ_rs_store::Result<()> {
     let mut model = store.model(profile).unwrap();
     model.apply_session(state, started_at, Corpus::bundled(), store.config());
-    store.finish_session(id, state, &model, prompt(next), started_at + 60)
+    let targets = store.session(id).unwrap().targets;
+    let events = achieved_doses(state, &targets);
+    store.finish_session(id, state, &model, &events, &next, started_at + 60)
 }
 
 /// Runs a whole session through the store: start, type the script, finish
@@ -193,7 +217,7 @@ fn opening_an_empty_file_runs_the_migrations_and_creates_the_default_profile() {
         .unwrap()
         .collect::<Result<_, _>>()
         .unwrap();
-    assert_eq!(versions, vec![1, 2, 3, 4]);
+    assert_eq!(versions, vec![1, 2, 3, 4, 5]);
 
     let tables: Vec<String> = conn
         .prepare("SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name")
@@ -232,7 +256,7 @@ fn reopening_does_not_rerun_migrations_or_duplicate_the_default_profile() {
     let profiles: i64 = conn
         .query_row("SELECT count(*) FROM profiles", [], |r| r.get(0))
         .unwrap();
-    assert_eq!((migrations, profiles), (4, 1));
+    assert_eq!((migrations, profiles), (5, 1));
 }
 
 #[test]
@@ -761,7 +785,7 @@ fn the_model_read_back_is_the_one_written_and_grows_with_each_session() {
     let mut model = store.model(&profile).unwrap();
     model.apply_session(&state, 1_000, Corpus::bundled(), store.config());
     store
-        .finish_session(id, &state, &model, self::prompt("next"), 1_060)
+        .finish_session(id, &state, &model, &[], &probes("next"), 1_060)
         .unwrap();
     model.mark_clean();
 
@@ -1052,4 +1076,325 @@ fn the_model_carries_the_profile_layout_and_refuses_one_this_build_does_not_know
     let error = store.model(&profile).unwrap_err();
     assert!(matches!(error, Error::UnknownLayout { .. }), "{error:?}");
     assert!(error.to_string().contains("colemak"), "{error}");
+}
+
+// --- Targets and training events ------------------------------------------------
+
+fn target(pattern: &str, role: TargetRole) -> SelectedTarget {
+    SelectedTarget {
+        pattern: pattern.into(),
+        role,
+        weakness_mean: 0.5,
+        weakness_sd: 0.25,
+        priority: 0.125,
+        planned_dose: if role == TargetRole::Deferred { 0 } else { 6 },
+    }
+}
+
+/// A prompt whose first word is targeted (exposing `at`) and the rest are
+/// probes, with `at` a target, `og` deferred, and `he` the exploration
+/// target.
+fn targeted(words: &str) -> ComposedPrompt {
+    let mut composed = probes(words);
+    composed.words[0] = ComposedWord {
+        role: WordRole::Targeted,
+        exposed_targets: vec!["at".into()],
+    };
+    composed.targets = vec![
+        target("at", TargetRole::Target),
+        target("og", TargetRole::Deferred),
+        target("he", TargetRole::Explore),
+    ];
+    composed
+}
+
+#[test]
+fn a_prompt_is_stored_with_its_word_roles_and_targets_and_read_back_with_the_session() {
+    let (_dir, path) = temp_db();
+    let (mut store, profile) = open(&path);
+    let composed = targeted("cat dog the");
+    let started = store
+        .start_session(
+            &profile,
+            SessionStart {
+                started_at: 1_000,
+                seed: 1,
+                word_count: 3,
+            },
+            || composed.clone(),
+        )
+        .unwrap();
+    assert_eq!(started.prompt, composed.prompt);
+    assert_eq!(started.targets, composed.targets);
+    assert_eq!(store.session(started.id).unwrap().targets, composed.targets);
+
+    let rows: Vec<(String, String, String)> = Connection::open(&path)
+        .unwrap()
+        .prepare("SELECT word, role, exposed_targets FROM prompt_words ORDER BY word_index")
+        .unwrap()
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
+    assert_eq!(
+        rows,
+        vec![
+            (
+                "cat".to_string(),
+                "targeted".to_string(),
+                r#"["at"]"#.to_string()
+            ),
+            ("dog".to_string(), "probe".to_string(), "[]".to_string()),
+            ("the".to_string(), "probe".to_string(), "[]".to_string()),
+        ]
+    );
+    let targets: Vec<(String, String, i64)> = Connection::open(&path)
+        .unwrap()
+        .prepare("SELECT pattern, role, planned_dose FROM prompt_targets ORDER BY rowid")
+        .unwrap()
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
+    assert_eq!(
+        targets,
+        vec![
+            ("at".to_string(), "target".to_string(), 6),
+            ("og".to_string(), "deferred".to_string(), 0),
+            ("he".to_string(), "explore".to_string(), 6),
+        ]
+    );
+}
+
+#[test]
+fn a_waiting_prompt_composed_ahead_keeps_its_targets_for_the_session_that_shows_it() {
+    let (_dir, path) = temp_db();
+    let (mut store, profile) = open(&path);
+    let (id, prompt) = start(&mut store, &profile, 1_000, "cat dog");
+    let state = typed(prompt, "cat dog");
+    finish_with(
+        &mut store,
+        &profile,
+        id,
+        1_000,
+        &state,
+        targeted("cat dog the"),
+    )
+    .unwrap();
+
+    let (_, shown) = start(&mut store, &profile, 2_000, "unused unused unused");
+    assert_eq!(shown, self::prompt("cat dog the"));
+    let sessions = store.completed_sessions(&profile, 10).unwrap();
+    assert!(
+        sessions[0].targets.is_empty(),
+        "the first prompt was probes only"
+    );
+    let running = store.session(SessionId::from_str("2").unwrap()).unwrap();
+    assert_eq!(running.targets, targeted("cat dog the").targets);
+}
+
+#[test]
+fn training_events_record_the_achieved_dose_of_every_selected_pattern() {
+    let (_dir, path) = temp_db();
+    let (mut store, profile) = open(&path);
+    let (id, prompt) = start(&mut store, &profile, 1_000, "cat dog");
+    let state = typed(prompt, "cat dog");
+    finish_with(
+        &mut store,
+        &profile,
+        id,
+        1_000,
+        &state,
+        targeted("cat that the"),
+    )
+    .unwrap();
+    let (id, prompt) = start(&mut store, &profile, 2_000, "unused unused unused");
+    // `at` is typed in "cat" and "that"; `he` in "the"; `og` nowhere.
+    let state = typed(prompt, "cat that the");
+    finish(&mut store, &profile, id, 2_000, &state, "next").unwrap();
+
+    let rows: Vec<(i64, String, String, i64, i64, i64)> = Connection::open(&path)
+        .unwrap()
+        .prepare(
+            "SELECT session_id, pattern, role, planned_dose, achieved_dose, model_version
+             FROM pattern_training_events ORDER BY session_id, rowid",
+        )
+        .unwrap()
+        .query_map([], |r| {
+            Ok((
+                r.get(0)?,
+                r.get(1)?,
+                r.get(2)?,
+                r.get(3)?,
+                r.get(4)?,
+                r.get(5)?,
+            ))
+        })
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
+    let v = i64::from(MODEL_VERSION);
+    assert_eq!(
+        rows,
+        vec![
+            (2, "at".to_string(), "target".to_string(), 6, 2, v),
+            (2, "og".to_string(), "deferred".to_string(), 0, 0, v),
+            (2, "he".to_string(), "explore".to_string(), 6, 1, v),
+        ]
+    );
+}
+
+#[test]
+fn the_training_history_replays_the_sessions_and_optionally_the_waiting_prompt() {
+    let (_dir, path) = temp_db();
+    let (mut store, profile) = open(&path);
+    assert_eq!(
+        store.training_history(&profile).unwrap(),
+        TrainingHistory::new()
+    );
+
+    let (id, prompt) = start(&mut store, &profile, 1_000, "cat dog");
+    let state = typed(prompt, "cat dog");
+    finish_with(
+        &mut store,
+        &profile,
+        id,
+        1_000,
+        &state,
+        targeted("cat that the"),
+    )
+    .unwrap();
+    // The history for composing has one session and no deferral yet; the
+    // one for showing counts the waiting prompt's fresh deferral of `og`.
+    let composing = store.training_history(&profile).unwrap();
+    assert_eq!(composing.sessions(), 1);
+    assert_eq!(composing.deferrals().count(), 0);
+    let showing = store
+        .training_history_with_waiting_prompt(&profile)
+        .unwrap();
+    assert_eq!(showing.sessions(), 2);
+    assert_eq!(showing.deferrals().collect::<Vec<_>>(), vec![("og", 2)]);
+
+    // Typed, it is a session like any other, and the probes-only prompt
+    // now waiting counts as one more with nothing selected, running the
+    // window down.
+    let (id, prompt) = start(&mut store, &profile, 2_000, "unused unused unused");
+    let state = typed(prompt, "cat that the");
+    finish(&mut store, &profile, id, 2_000, &state, "next").unwrap();
+    let history = store.training_history(&profile).unwrap();
+    assert_eq!(history.sessions(), 2);
+    assert_eq!(history.deferrals().collect::<Vec<_>>(), vec![("og", 2)]);
+    let showing = store
+        .training_history_with_waiting_prompt(&profile)
+        .unwrap();
+    assert_eq!(showing.sessions(), 3);
+    assert_eq!(showing.deferrals().collect::<Vec<_>>(), vec![("og", 1)]);
+    let at = history.pattern("at").unwrap();
+    assert_eq!((at.sessions_practised, at.achieved_dose), (1, 2));
+    assert_eq!(at.first_weakness_mean, Some(0.5));
+
+    // A whole history built the same way in memory agrees.
+    let mut expected = TrainingHistory::new();
+    expected.record(&[], store.config());
+    expected.record(
+        &[
+            TrainingEvent {
+                target: target("at", TargetRole::Target),
+                achieved_dose: 2,
+            },
+            TrainingEvent {
+                target: target("og", TargetRole::Deferred),
+                achieved_dose: 0,
+            },
+            TrainingEvent {
+                target: target("he", TargetRole::Explore),
+                achieved_dose: 1,
+            },
+        ],
+        store.config(),
+    );
+    assert_eq!(history, expected);
+}
+
+#[test]
+fn a_targeted_history_rebuilds_to_identical_caches() {
+    let (_dir, path) = temp_db();
+    {
+        let (mut store, profile) = open(&path);
+        let corpus = Corpus::bundled();
+        let words: Vec<&str> = corpus
+            .words()
+            .iter()
+            .take(60)
+            .map(|w| w.text.as_ref())
+            .collect();
+        let words = words.join(" ");
+        // Five sessions composed by the real scheduler, each typed in full.
+        let (mut id, mut prompt) = start(&mut store, &profile, 1_000, &words);
+        for i in 0..5 {
+            let started_at = 1_000 + i * 86_400;
+            let text = prompt.text();
+            let state = typed(prompt, &text);
+            let mut model = store.model(&profile).unwrap();
+            model.apply_session(&state, started_at, corpus, store.config());
+            let mut history = store.training_history(&profile).unwrap();
+            let events = scheduler::achieved_doses(&state, &store.session(id).unwrap().targets);
+            history.record(&events, store.config());
+            let next = compose::next_prompt(
+                &model,
+                corpus,
+                store.config(),
+                &history,
+                started_at + 60,
+                30,
+                i as u64,
+            );
+            store
+                .finish_session(id, &state, &model, &events, &next, started_at + 60)
+                .unwrap();
+            (id, prompt) = start_with(&mut store, &profile, started_at + 86_400, 30, "unused");
+        }
+    }
+    let truth_before = dump(&path);
+    let caches_before = dump_tables(&path, CACHES);
+    assert!(caches_before["pattern_training_events"].len() >= 4);
+    let targets: i64 = sql_one(&path, "SELECT count(*) FROM prompt_targets");
+    assert!(targets >= 4, "{targets}");
+
+    let (mut store, _) = open(&path);
+    assert_eq!(store.rebuild().unwrap(), 5);
+    assert_eq!(dump(&path), truth_before);
+    assert_eq!(dump_tables(&path, CACHES), caches_before);
+}
+
+#[test]
+fn training_events_from_another_model_version_alone_trigger_a_rebuild() {
+    let (_dir, path) = temp_db();
+    {
+        let (mut store, profile) = open(&path);
+        let (id, prompt) = start(&mut store, &profile, 1_000, "cat dog");
+        let state = typed(prompt, "cat dog");
+        finish_with(
+            &mut store,
+            &profile,
+            id,
+            1_000,
+            &state,
+            targeted("cat that the"),
+        )
+        .unwrap();
+        let (id, prompt) = start(&mut store, &profile, 2_000, "unused unused unused");
+        let state = typed(prompt, "cat that the");
+        finish(&mut store, &profile, id, 2_000, &state, "next").unwrap();
+    }
+    let caches_before = dump_tables(&path, CACHES);
+    sql(
+        &path,
+        "UPDATE pattern_training_events SET model_version = model_version + 1, achieved_dose = 99",
+    );
+    assert_ne!(dump_tables(&path, CACHES), caches_before);
+
+    let (store, _) = open(&path);
+    drop(store);
+    assert_eq!(dump_tables(&path, CACHES), caches_before);
 }

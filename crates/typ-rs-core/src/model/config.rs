@@ -38,6 +38,48 @@ pub struct SchedulerConfig {
     /// weight; the accuracy factor rises linearly between them.
     pub accuracy_gate_zero: f64,
     pub accuracy_gate_full: f64,
+    /// The share of a pattern's weakness carried by each component: error
+    /// excess, speed excess, inconsistency, and hesitation excess.
+    pub weight_error: f64,
+    pub weight_speed: f64,
+    pub weight_inconsistency: f64,
+    pub weight_hesitation: f64,
+    /// How much of a pattern's absolute slowness counts toward its training
+    /// value on top of its weakness.
+    pub slowness_share: f64,
+    /// The most variance the log of an error or hesitation rate ratio can
+    /// carry into the weakness uncertainty; one means a pattern with no
+    /// evidence is taken to lie within a factor of `e` of its parent, one
+    /// standard deviation.
+    pub log_ratio_variance_cap: f64,
+    /// A bigram or trigram is eligible for targeting only above this
+    /// importance and only if it occurs in at least this many corpus words.
+    pub importance_floor: f64,
+    pub min_pattern_words: usize,
+    /// How many top-ranked patterns become candidates, and how many of the
+    /// undeferred candidates become targets.
+    pub candidates: usize,
+    pub max_targets: usize,
+    /// The chance that a candidate is withheld as a control, and for how
+    /// many sessions it then stays out of candidacy.
+    pub deferral_probability: f64,
+    pub deferral_window: usize,
+    /// Exposures a target should receive in a session.
+    pub dose: usize,
+    /// A target is plateaued once practised in at least this many sessions
+    /// with more than this cumulative achieved dose and no change in its
+    /// weakness beyond its uncertainty; its priority is then scaled by the
+    /// plateau factor, recovering to one over this many untargeted sessions.
+    pub plateau_min_sessions: usize,
+    pub plateau_min_dose: usize,
+    pub plateau_factor: f64,
+    pub plateau_recovery_sessions: usize,
+    /// The targeted share of a prompt: zero before the first completed
+    /// session, then rising linearly from the start share to the full share
+    /// over this many completed sessions.
+    pub ramp_start_share: f64,
+    pub ramp_full_share: f64,
+    pub ramp_sessions: usize,
 }
 
 impl Default for SchedulerConfig {
@@ -55,6 +97,26 @@ impl Default for SchedulerConfig {
             context_ridge_lambda: 1.0,
             accuracy_gate_zero: 0.90,
             accuracy_gate_full: 0.98,
+            weight_error: 0.50,
+            weight_speed: 0.25,
+            weight_inconsistency: 0.10,
+            weight_hesitation: 0.15,
+            slowness_share: 0.3,
+            log_ratio_variance_cap: 1.0,
+            importance_floor: 0.005,
+            min_pattern_words: 5,
+            candidates: 8,
+            max_targets: 5,
+            deferral_probability: 0.25,
+            deferral_window: 3,
+            dose: 6,
+            plateau_min_sessions: 4,
+            plateau_min_dose: 20,
+            plateau_factor: 0.5,
+            plateau_recovery_sessions: 10,
+            ramp_start_share: 0.30,
+            ramp_full_share: 0.80,
+            ramp_sessions: 4,
         }
     }
 }
@@ -141,6 +203,126 @@ const TUNABLES: &[Tunable] = &[
         get: |c| c.accuracy_gate_full,
         set: |c, v| c.accuracy_gate_full = v,
         whole_number: false,
+    },
+    Tunable {
+        name: "weight_error",
+        get: |c| c.weight_error,
+        set: |c, v| c.weight_error = v,
+        whole_number: false,
+    },
+    Tunable {
+        name: "weight_speed",
+        get: |c| c.weight_speed,
+        set: |c, v| c.weight_speed = v,
+        whole_number: false,
+    },
+    Tunable {
+        name: "weight_inconsistency",
+        get: |c| c.weight_inconsistency,
+        set: |c, v| c.weight_inconsistency = v,
+        whole_number: false,
+    },
+    Tunable {
+        name: "weight_hesitation",
+        get: |c| c.weight_hesitation,
+        set: |c, v| c.weight_hesitation = v,
+        whole_number: false,
+    },
+    Tunable {
+        name: "slowness_share",
+        get: |c| c.slowness_share,
+        set: |c, v| c.slowness_share = v,
+        whole_number: false,
+    },
+    Tunable {
+        name: "log_ratio_variance_cap",
+        get: |c| c.log_ratio_variance_cap,
+        set: |c, v| c.log_ratio_variance_cap = v,
+        whole_number: false,
+    },
+    Tunable {
+        name: "importance_floor",
+        get: |c| c.importance_floor,
+        set: |c, v| c.importance_floor = v,
+        whole_number: false,
+    },
+    Tunable {
+        name: "min_pattern_words",
+        get: |c| c.min_pattern_words as f64,
+        set: |c, v| c.min_pattern_words = v as usize,
+        whole_number: true,
+    },
+    Tunable {
+        name: "candidates",
+        get: |c| c.candidates as f64,
+        set: |c, v| c.candidates = v as usize,
+        whole_number: true,
+    },
+    Tunable {
+        name: "max_targets",
+        get: |c| c.max_targets as f64,
+        set: |c, v| c.max_targets = v as usize,
+        whole_number: true,
+    },
+    Tunable {
+        name: "deferral_probability",
+        get: |c| c.deferral_probability,
+        set: |c, v| c.deferral_probability = v,
+        whole_number: false,
+    },
+    Tunable {
+        name: "deferral_window",
+        get: |c| c.deferral_window as f64,
+        set: |c, v| c.deferral_window = v as usize,
+        whole_number: true,
+    },
+    Tunable {
+        name: "dose",
+        get: |c| c.dose as f64,
+        set: |c, v| c.dose = v as usize,
+        whole_number: true,
+    },
+    Tunable {
+        name: "plateau_min_sessions",
+        get: |c| c.plateau_min_sessions as f64,
+        set: |c, v| c.plateau_min_sessions = v as usize,
+        whole_number: true,
+    },
+    Tunable {
+        name: "plateau_min_dose",
+        get: |c| c.plateau_min_dose as f64,
+        set: |c, v| c.plateau_min_dose = v as usize,
+        whole_number: true,
+    },
+    Tunable {
+        name: "plateau_factor",
+        get: |c| c.plateau_factor,
+        set: |c, v| c.plateau_factor = v,
+        whole_number: false,
+    },
+    Tunable {
+        name: "plateau_recovery_sessions",
+        get: |c| c.plateau_recovery_sessions as f64,
+        set: |c, v| c.plateau_recovery_sessions = v as usize,
+        whole_number: true,
+    },
+    Tunable {
+        name: "ramp_start_share",
+        get: |c| c.ramp_start_share,
+        set: |c, v| c.ramp_start_share = v,
+        whole_number: false,
+    },
+    Tunable {
+        name: "ramp_full_share",
+        get: |c| c.ramp_full_share,
+        set: |c, v| c.ramp_full_share = v,
+        whole_number: false,
+    },
+    Tunable {
+        name: "ramp_sessions",
+        get: |c| c.ramp_sessions as f64,
+        set: |c, v| c.ramp_sessions = v as usize,
+        whole_number: true,
     },
 ];
 

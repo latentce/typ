@@ -1,8 +1,10 @@
 use std::path::Path;
 use std::process::Command;
 
+use typ_rs_core::compose::ComposedPrompt;
 use typ_rs_core::corpus::{CORPUS_VERSION, Corpus};
 use typ_rs_core::prompt::Prompt;
+use typ_rs_core::scheduler::{SelectedTarget, TargetRole, achieved_doses};
 use typ_rs_core::session::{EndCondition, Input, Key, SessionState};
 use typ_rs_store::{DEFAULT_PROFILE, SessionStart, Store};
 
@@ -37,9 +39,21 @@ fn typ(args: &[&str]) -> Run {
 /// Types `script` against `prompt`, one key per 100 ms, and stores the
 /// session as started at `started_at`, applied to the profile's statistics
 /// the way a live session is. Whatever prompt is waiting is replaced by
-/// `prompt` again, so every session in a test types `prompt`. `⌫` is
-/// backspace and `⎋` an interrupt.
+/// `prompt` again, as probes only, so every session in a test types
+/// `prompt`. `⌫` is backspace and `⎋` an interrupt.
 fn store_session(store: &mut Store, started_at: i64, prompt: &str, script: &str) {
+    store_session_with(store, started_at, prompt, script, Vec::new());
+}
+
+/// As [`store_session`], with the given patterns selected for the prompt
+/// waiting afterwards.
+fn store_session_with(
+    store: &mut Store,
+    started_at: i64,
+    prompt: &str,
+    script: &str,
+    next_targets: Vec<SelectedTarget>,
+) {
     let profile = store.profile(DEFAULT_PROFILE).unwrap();
     let words = || Prompt::new(prompt.split(' '));
     let started = store
@@ -50,7 +64,7 @@ fn store_session(store: &mut Store, started_at: i64, prompt: &str, script: &str)
                 seed: 1,
                 word_count: words().word_count(),
             },
-            words,
+            || ComposedPrompt::probes(words()),
         )
         .unwrap();
     assert_eq!(started.prompt, words());
@@ -68,9 +82,23 @@ fn store_session(store: &mut Store, started_at: i64, prompt: &str, script: &str)
     }
     let mut model = store.model(&profile).unwrap();
     model.apply_session(&state, started_at, Corpus::bundled(), store.config());
+    let events = achieved_doses(&state, &started.targets);
+    let mut next = ComposedPrompt::probes(words());
+    next.targets = next_targets;
     store
-        .finish_session(started.id, &state, &model, words(), started_at + 60)
+        .finish_session(started.id, &state, &model, &events, &next, started_at + 60)
         .unwrap();
+}
+
+fn target(pattern: &str, role: TargetRole) -> SelectedTarget {
+    SelectedTarget {
+        pattern: pattern.into(),
+        role,
+        weakness_mean: 0.5,
+        weakness_sd: 0.2,
+        priority: 0.1,
+        planned_dose: 6,
+    }
 }
 
 #[test]
@@ -166,7 +194,41 @@ fn stats_lists_completed_sessions_most_recent_first_and_skips_interrupted_ones()
         errors.lines().nth(3).unwrap().starts_with("  o   "),
         "{errors}"
     );
+    let weakest = sections.next().unwrap();
+    assert!(
+        weakest.starts_with("weakest patterns\n  ␣do  +"),
+        "{weakest}"
+    );
+    assert!(weakest.lines().nth(1).unwrap().contains(" ± "), "{weakest}");
     assert_eq!(sections.next(), None);
+}
+
+#[test]
+fn stats_shows_the_deferred_candidates_with_their_windows() {
+    let dir = tempfile::tempdir().unwrap();
+    {
+        let mut store = Store::open(&dir.path().join("typ.db")).unwrap();
+        store_session(&mut store, 1_705_314_600, "cat dog", "cat dog");
+        // The prompt composed ahead defers `og` and targets `at`.
+        store_session_with(
+            &mut store,
+            1_705_392_000,
+            "cat dog",
+            "cat dog",
+            vec![
+                target("at", TargetRole::Target),
+                target("og", TargetRole::Deferred),
+            ],
+        );
+    }
+
+    let run = typ_in(dir.path(), &["stats"]);
+    assert!(run.ok, "{}", run.stderr);
+    let deferred = run.stdout.split("\n\n").last().unwrap();
+    assert_eq!(
+        deferred,
+        "deferred candidates\n  og   2 sessions remaining\n"
+    );
 }
 
 #[test]

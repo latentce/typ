@@ -1,7 +1,8 @@
-//! Persistence for `typ`: profiles and their settings, prompts, sessions,
-//! and input events in a local SQLite file, plus the caches derived from
-//! them: the pattern statistics, the context model, and the prompt composed
-//! ahead for the next session.
+//! Persistence for `typ`: profiles and their settings, prompts with the
+//! patterns selected for them, sessions, and input events in a local SQLite
+//! file, plus the caches derived from them: the pattern statistics, the
+//! context model, the training events, and the prompt composed ahead for
+//! the next session.
 //!
 //! The database is opened once per process. Sessions, prompts, and input
 //! events are the source of truth: a session's row is written before it
@@ -15,6 +16,7 @@ mod model;
 mod prompts;
 mod sessions;
 mod settings;
+mod training;
 
 use std::fmt;
 use std::path::Path;

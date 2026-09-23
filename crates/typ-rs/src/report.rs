@@ -1,4 +1,4 @@
-//! The plain-text output of `typ`: the results line, the session listing,
+//! The plain-text output of `typ`: the results block, the session listing,
 //! the pattern summary, and the replay report.
 
 use std::fmt::Write;
@@ -6,17 +6,26 @@ use std::fmt::Write;
 use typ_rs_core::analysis::{
     Interval, IntervalClass, SessionAnalysis, SessionMetrics, WordAnalysis, analyze,
 };
-use typ_rs_core::model::{ModelState, PatternEstimate, ROOT, SchedulerConfig};
+use typ_rs_core::compose::ComposedPrompt;
+use typ_rs_core::corpus::Corpus;
+use typ_rs_core::model::{ModelState, PatternEstimate, ROOT, SchedulerConfig, Weakness};
+use typ_rs_core::scheduler::{TargetRole, TrainingHistory, eligible_patterns};
 use typ_rs_core::session::{EventKind, Outcome, SessionState};
 use typ_rs_store::StoredSession;
 
 /// How many patterns each list of the pattern summary shows.
 const LISTED_PATTERNS: usize = 10;
 
-/// The line printed when a session ends. Speed and accuracy are reported
-/// only for a completed session: a partial prompt has no meaningful WPM.
-pub fn results(state: &SessionState, metrics: &SessionMetrics) -> String {
-    match state.outcome() {
+/// The block printed when a session ends: the session's figures, then the
+/// patterns the next prompt will practise when the next prompt is known.
+/// Speed and accuracy are reported only for a completed session: a partial
+/// prompt has no meaningful WPM.
+pub fn results(
+    state: &SessionState,
+    metrics: &SessionMetrics,
+    next: Option<&ComposedPrompt>,
+) -> String {
+    let mut out = match state.outcome() {
         Some(Outcome::Completed) => {
             let wpm = metrics.gross_wpm.unwrap_or(0.0);
             let raw = 100.0 * metrics.raw_accuracy;
@@ -31,6 +40,32 @@ pub fn results(state: &SessionState, metrics: &SessionMetrics) -> String {
             let words = state.words_completed();
             format!("interrupted after {words} {}", plural(words, "word"))
         }
+    };
+    if let Some(next) = next {
+        let _ = write!(out, "\n{}", next_line(next));
+    }
+    out
+}
+
+/// `next:` followed by the next prompt's targets in rank order and its
+/// exploration target, or `none yet` when nothing was selected for it.
+fn next_line(next: &ComposedPrompt) -> String {
+    let targets: Vec<String> = next
+        .targets
+        .iter()
+        .filter(|t| t.role == TargetRole::Target)
+        .map(|t| visible(&t.pattern))
+        .collect();
+    let explore = next
+        .targets
+        .iter()
+        .find(|t| t.role == TargetRole::Explore)
+        .map(|t| visible(&t.pattern));
+    match (targets.is_empty(), explore) {
+        (true, None) => "next: none yet".to_string(),
+        (true, Some(e)) => format!("next: exploring {e}"),
+        (false, None) => format!("next: {}", targets.join(", ")),
+        (false, Some(e)) => format!("next: {} (exploring {e})", targets.join(", ")),
     }
 }
 
@@ -56,13 +91,20 @@ pub fn session_listing(sessions: &[StoredSession]) -> String {
         .collect()
 }
 
-/// The patterns the model believes the user is slowest on and most
-/// error-prone on: the ten with the highest absolute slowness among those
-/// with latency evidence, and the ten with the highest error probability
-/// among those with first-attempt trials, each with its effective sample
-/// size. Empty when nothing has been observed. Estimates are as of the last
-/// session applied.
-pub fn pattern_summary(model: &ModelState, config: &SchedulerConfig) -> String {
+/// What the model believes about the user's patterns: the ten with the
+/// highest absolute slowness among those with latency evidence, the ten
+/// with the highest error probability among those with first-attempt
+/// trials, each with its effective sample size; the ten eligible patterns
+/// the user has typed with the highest weakness, as mean ± sd; and the
+/// deferred candidates with the sessions remaining in their windows. Empty
+/// when nothing has been observed. Estimates are as of the last session
+/// applied.
+pub fn pattern_summary(
+    model: &ModelState,
+    corpus: &Corpus,
+    config: &SchedulerConfig,
+    history: &TrainingHistory,
+) -> String {
     let Some(at) = model.last_update() else {
         return String::new();
     };
@@ -105,6 +147,40 @@ pub fn pattern_summary(model: &ModelState, config: &SchedulerConfig) -> String {
                 visible(e.pattern),
                 100.0 * e.estimate.error_probability,
                 e.estimate.n_eff
+            );
+        }
+    }
+
+    let eligible = eligible_patterns(corpus, config);
+    let mut weakest: Vec<(&str, Weakness)> = eligible
+        .iter()
+        .filter(|e| model.stats(&e.pattern).is_some())
+        .map(|e| (e.pattern.as_ref(), model.weakness(&e.pattern, at, config)))
+        .collect();
+    weakest.sort_by(|a, b| b.1.mean.total_cmp(&a.1.mean).then_with(|| a.0.cmp(b.0)));
+    weakest.truncate(LISTED_PATTERNS);
+    if !weakest.is_empty() {
+        let _ = writeln!(out, "\nweakest patterns");
+        for (pattern, w) in &weakest {
+            let _ = writeln!(
+                out,
+                "  {:<3}  {:>+5.2} ± {:.2}",
+                visible(pattern),
+                w.mean,
+                w.sd
+            );
+        }
+    }
+
+    let deferred: Vec<(&str, usize)> = history.deferrals().collect();
+    if !deferred.is_empty() {
+        let _ = writeln!(out, "\ndeferred candidates");
+        for (pattern, remaining) in deferred {
+            let _ = writeln!(
+                out,
+                "  {:<3}  {remaining} {} remaining",
+                visible(pattern),
+                plural(remaining, "session")
             );
         }
     }
@@ -155,7 +231,7 @@ pub fn replay(session: &StoredSession, state: &SessionState, analysis: &SessionA
         state.word_count(),
         plural(state.word_count(), "word")
     );
-    let _ = writeln!(out, "{}", results(state, m));
+    let _ = writeln!(out, "{}", results(state, m, None));
     let _ = writeln!(
         out,
         "{} {}  {} uncorrected  error latency {}  {} clean {}",
@@ -256,12 +332,13 @@ fn plural(count: usize, noun: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use typ_rs_core::corpus::Corpus;
+    use typ_rs_core::compose::ComposedPrompt;
     use typ_rs_core::prompt::Prompt;
+    use typ_rs_core::scheduler::{SelectedTarget, TrainingEvent};
     use typ_rs_core::session::{EndCondition, Input, Key};
 
     /// `⎋` is an interrupt, `⌫` a backspace; one keystroke every 100 ms.
-    fn run(prompt: &str, script: &str) -> String {
+    fn typed(prompt: &str, script: &str) -> SessionState {
         let mut state = SessionState::new(
             Prompt::new(prompt.split(' ')),
             EndCondition::AfterWords(usize::MAX),
@@ -274,7 +351,29 @@ mod tests {
             };
             state.apply_event(Input::new(i as u64 * 100_000, key));
         }
-        results(&state, &analyze(&state).metrics)
+        state
+    }
+
+    fn run(prompt: &str, script: &str) -> String {
+        let state = typed(prompt, script);
+        results(&state, &analyze(&state).metrics, None)
+    }
+
+    fn target(pattern: &str, role: TargetRole) -> SelectedTarget {
+        SelectedTarget {
+            pattern: pattern.into(),
+            role,
+            weakness_mean: 0.5,
+            weakness_sd: 0.2,
+            priority: 0.1,
+            planned_dose: 6,
+        }
+    }
+
+    fn next_with(targets: Vec<SelectedTarget>) -> ComposedPrompt {
+        let mut next = ComposedPrompt::probes(Prompt::new(["cat"]));
+        next.targets = targets;
+        next
     }
 
     #[test]
@@ -306,9 +405,49 @@ mod tests {
     }
 
     #[test]
+    fn the_next_line_lists_the_targets_in_rank_order_and_the_exploration_target() {
+        let state = typed("cat dog fox", "cat do⎋");
+        let metrics = analyze(&state).metrics;
+        assert_eq!(
+            results(&state, &metrics, Some(&next_with(vec![]))),
+            "interrupted after 1 word\nnext: none yet"
+        );
+        let next = next_with(vec![
+            target(" th", TargetRole::Target),
+            target("ing", TargetRole::Target),
+            target("he", TargetRole::Deferred),
+            target("e ", TargetRole::Target),
+            target("ou", TargetRole::Explore),
+        ]);
+        assert_eq!(
+            results(&state, &metrics, Some(&next))
+                .lines()
+                .nth(1)
+                .unwrap(),
+            "next: ␣th, ing, e␣ (exploring ou)"
+        );
+        let only_explore = next_with(vec![target("ou", TargetRole::Explore)]);
+        assert_eq!(
+            results(&state, &metrics, Some(&only_explore))
+                .lines()
+                .nth(1)
+                .unwrap(),
+            "next: exploring ou"
+        );
+    }
+
+    #[test]
     fn the_pattern_summary_is_empty_until_something_has_been_observed() {
         let config = SchedulerConfig::default();
-        assert_eq!(pattern_summary(&ModelState::new(), &config), "");
+        assert_eq!(
+            pattern_summary(
+                &ModelState::new(),
+                Corpus::bundled(),
+                &config,
+                &TrainingHistory::new()
+            ),
+            ""
+        );
     }
 
     #[test]
@@ -332,7 +471,15 @@ mod tests {
         model.apply_session(&session("cat dog"), 1_000, Corpus::bundled(), &config);
         model.apply_session(&session("cat dxg "), 1_000, Corpus::bundled(), &config);
 
-        let summary = pattern_summary(&model, &config);
+        let mut history = TrainingHistory::new();
+        history.record(
+            &[TrainingEvent {
+                target: target("og", TargetRole::Deferred),
+                achieved_dose: 0,
+            }],
+            &config,
+        );
+        let summary = pattern_summary(&model, Corpus::bundled(), &config, &history);
         let lines: Vec<&str> = summary.lines().collect();
         assert_eq!(lines[0], "");
         assert_eq!(lines[1], "slowest patterns");
@@ -347,6 +494,21 @@ mod tests {
             .unwrap();
         assert_eq!(lines[errors - 1], "");
         assert!(lines[errors + 1].starts_with("  ␣do  "), "{summary}");
+        // The weakest eligible patterns the user has typed, as mean ± sd:
+        // the error on `o` after `d` makes ` do` and `do` the weakest.
+        let weakest = lines.iter().position(|l| *l == "weakest patterns").unwrap();
+        assert_eq!(lines[weakest - 1], "");
+        assert!(lines[weakest + 1].starts_with("  ␣do  +"), "{summary}");
+        assert!(lines[weakest + 1].contains(" ± "), "{summary}");
+        assert!(lines[weakest + 2].starts_with("  do   +"), "{summary}");
+        // Deferred candidates with their windows.
+        let deferred = lines
+            .iter()
+            .position(|l| *l == "deferred candidates")
+            .unwrap();
+        assert_eq!(lines[deferred - 1], "");
+        assert_eq!(lines[deferred + 1], "  og   2 sessions remaining");
+        assert_eq!(lines.len(), deferred + 2);
         assert!(!summary.contains("\n   "), "{summary}");
     }
 }
