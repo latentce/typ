@@ -1,7 +1,7 @@
 //! Persistence for `typ`: profiles and their settings, prompts, sessions,
 //! and input events in a local SQLite file, plus the caches derived from
-//! them: the pattern statistics and the prompt composed ahead for the next
-//! session.
+//! them: the pattern statistics, the context model, and the prompt composed
+//! ahead for the next session.
 //!
 //! The database is opened once per process. Sessions, prompts, and input
 //! events are the source of truth: a session's row is written before it
@@ -45,6 +45,9 @@ pub enum Error {
     SchemaTooNew { found: i64, supported: i64 },
     /// No profile row has the given name.
     NoSuchProfile(String),
+    /// The profile is bound to a layout this build has no geometry for, so
+    /// its model cannot be read or extended.
+    UnknownLayout { profile: String, layout: String },
     /// No session row has the given id.
     NoSuchSession(SessionId),
     /// The session has already ended; its rows are never changed again.
@@ -67,6 +70,10 @@ impl fmt::Display for Error {
                 "the database schema is version {found}, newer than the version {supported} this build supports"
             ),
             Error::NoSuchProfile(name) => write!(f, "no profile named {name:?}"),
+            Error::UnknownLayout { profile, layout } => write!(
+                f,
+                "profile {profile:?} is bound to layout {layout:?}, which this build does not know"
+            ),
             Error::NoSuchSession(id) => write!(f, "no session {id}"),
             Error::SessionAlreadyEnded(id) => write!(f, "session {id} has already ended"),
             Error::InvalidSetting(message) => f.write_str(message),

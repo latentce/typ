@@ -27,16 +27,24 @@ nothing has been typed on it yet. Only `qwerty` exists so far.
 After each session `typ` updates decaying statistics for every character,
 bigram, and trigram you typed (space counts as an ordinary character, so the
 start and end of words are patterns too), normalised for your usual speed and
-for how fast you were going that day. `typ stats` lists your recent completed
+for how fast you were going that day. How much a session's speed counts
+depends on its raw accuracy: nothing at or below 90%, fully from 98%, so speed
+bought by accepting errors is not rewarded. From your fifth completed session
+on, and every five after that, `typ` also fits a small model of how much of a
+pattern's slowness is explained by its context: where it sits in its words,
+how long and how common they are, and what your fingers have to do to reach
+it on your layout (same finger, same hand, row change, key distance). That
+separates a pattern that is merely awkward on the keyboard from one you are
+personally weak on. `typ stats` lists your recent completed
 sessions with their ids, then the ten patterns you are slowest on relative to
 your baseline and the ten you most often get wrong, each with how much
 evidence is behind it. Every statistic is a cache: `typ rebuild` recomputes
 all of them from your stored sessions, and an upgrade that changes the
 algorithm does so automatically. `typ replay <id>` shows how a stored session
-was interpreted: each word's first attempt and the patterns its errors count
-against, and which keystroke intervals count as clean motor evidence. The
-scheduler that turns these statistics into targeted prompts is being built
-on top of this.
+was interpreted: each word's first attempt, its own raw accuracy, and the
+patterns its errors count against, and which keystroke intervals count as
+clean motor evidence. The scheduler that turns these statistics into targeted
+prompts is being built on top of this.
 
 ```
 $ typ --version

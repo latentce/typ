@@ -44,9 +44,12 @@ pub(super) fn from_csv(csv: &str) -> Result<Corpus, CorpusError> {
         })
         .collect();
     let [characters, bigrams, trigrams] = pattern_levels(&words);
+    let mut by_text: Vec<WordId> = (0..words.len()).map(WordId::from_index).collect();
+    by_text.sort_by(|&a, &b| words[a.index()].text.cmp(&words[b.index()].text));
 
     Ok(Corpus {
         words,
+        by_text,
         characters,
         bigrams,
         trigrams,

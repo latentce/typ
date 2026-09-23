@@ -146,7 +146,7 @@ fn session(words: Option<&str>, profile: Option<&str>) -> Result<(), Box<dyn Err
     let next = compose::frequency_weighted(corpus, stored_words, seed);
     let (results, saved) = match store.model(&profile) {
         Ok(mut model) => {
-            let update = model.apply_session(&run.state, started_at, store.config());
+            let update = model.apply_session(&run.state, started_at, corpus, store.config());
             let results = report::results(&run.state, &update.analysis.metrics);
             let saved = store.finish_session(started.id, &run.state, &model, next, unix_now());
             (results, saved)

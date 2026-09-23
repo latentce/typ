@@ -234,3 +234,14 @@ fn patterns_are_looked_up_by_text_and_map_back_to_words() {
     assert!(words.iter().all(|w| w.starts_with("th")));
     assert!(corpus.words_containing("e t").is_empty());
 }
+
+#[test]
+fn a_word_is_found_by_its_text() {
+    let corpus = corpus(&[("the", 100), ("of", 50), ("cat", 10)]);
+    let of = corpus.word_by_text("of").unwrap();
+    assert_eq!(&*of.text, "of");
+    assert_eq!(of.frequency_weight, (50.0f64 / 160.0).sqrt());
+    assert_eq!(corpus.word_by_text("dog"), None);
+    assert_eq!(corpus.word_by_text(""), None);
+    assert_eq!(corpus.word_by_text("The"), None);
+}

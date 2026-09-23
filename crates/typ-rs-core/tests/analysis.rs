@@ -470,6 +470,22 @@ fn raw_accuracy_is_first_attempt_correct_characters_over_target_characters() {
 }
 
 #[test]
+fn each_submitted_word_has_its_own_raw_accuracy_and_an_unsubmitted_word_has_none() {
+    let analysis = run("cat their dog fox", "cxt thier xxxxxxxx fo⎋");
+    let per_word: Vec<Option<f64>> = analysis.words.iter().map(|w| w.raw_accuracy()).collect();
+    assert!(close(per_word[0].unwrap(), 2.0 / 3.0), "{per_word:?}");
+    assert!(close(per_word[1].unwrap(), 4.0 / 5.0), "{per_word:?}");
+    assert_eq!(per_word[2], Some(0.0));
+    assert_eq!(per_word[3], None);
+    // The session figure is over target characters, not a mean of words.
+    assert!(
+        close(analysis.metrics.raw_accuracy, 6.0 / 11.0),
+        "{}",
+        analysis.metrics.raw_accuracy
+    );
+}
+
+#[test]
 fn final_accuracy_and_gross_wpm_describe_the_text_as_submitted() {
     let m = run("cat dog", "cxt⌫⌫at dog").metrics;
     assert_eq!(m.final_accuracy, 1.0);

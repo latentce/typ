@@ -27,6 +27,17 @@ pub struct SchedulerConfig {
     /// An interrupted session's observations count only with at least this
     /// many clean intervals.
     pub interrupted_min_clean_intervals: usize,
+    /// The context model is refitted after every this many completed
+    /// sessions; zero never refits.
+    pub context_refit_sessions: usize,
+    /// The ridge penalty on the context model's weights, in units of
+    /// latency weight.
+    pub context_ridge_lambda: f64,
+    /// The session raw accuracy at or below which a session's speed
+    /// evidence carries no weight, and the one from which it carries full
+    /// weight; the accuracy factor rises linearly between them.
+    pub accuracy_gate_zero: f64,
+    pub accuracy_gate_full: f64,
 }
 
 impl Default for SchedulerConfig {
@@ -40,6 +51,10 @@ impl Default for SchedulerConfig {
             latency_variance_prior: 0.1,
             offset_regulariser: 20.0,
             interrupted_min_clean_intervals: 20,
+            context_refit_sessions: 5,
+            context_ridge_lambda: 1.0,
+            accuracy_gate_zero: 0.90,
+            accuracy_gate_full: 0.98,
         }
     }
 }
@@ -102,6 +117,30 @@ const TUNABLES: &[Tunable] = &[
         get: |c| c.interrupted_min_clean_intervals as f64,
         set: |c, v| c.interrupted_min_clean_intervals = v as usize,
         whole_number: true,
+    },
+    Tunable {
+        name: "context_refit_sessions",
+        get: |c| c.context_refit_sessions as f64,
+        set: |c, v| c.context_refit_sessions = v as usize,
+        whole_number: true,
+    },
+    Tunable {
+        name: "context_ridge_lambda",
+        get: |c| c.context_ridge_lambda,
+        set: |c, v| c.context_ridge_lambda = v,
+        whole_number: false,
+    },
+    Tunable {
+        name: "accuracy_gate_zero",
+        get: |c| c.accuracy_gate_zero,
+        set: |c, v| c.accuracy_gate_zero = v,
+        whole_number: false,
+    },
+    Tunable {
+        name: "accuracy_gate_full",
+        get: |c| c.accuracy_gate_full,
+        set: |c, v| c.accuracy_gate_full = v,
+        whole_number: false,
     },
 ];
 

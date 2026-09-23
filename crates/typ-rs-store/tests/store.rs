@@ -3,7 +3,8 @@ use std::path::Path;
 
 use rusqlite::Connection;
 use tempfile::TempDir;
-use typ_rs_core::corpus::CORPUS_VERSION;
+use typ_rs_core::corpus::{CORPUS_VERSION, Corpus};
+use typ_rs_core::layout::Layout;
 use typ_rs_core::model::{MODEL_VERSION, ModelState, SchedulerConfig};
 use typ_rs_core::prompt::Prompt;
 use typ_rs_core::session::{EndCondition, Input, Key, Outcome, SessionState};
@@ -21,7 +22,7 @@ const SOURCE_OF_TRUTH: &[&str] = &[
     "input_events",
 ];
 
-const CACHES: &[&str] = &["pattern_stats"];
+const CACHES: &[&str] = &["pattern_stats", "context_model"];
 
 fn temp_db() -> (TempDir, std::path::PathBuf) {
     let dir = tempfile::tempdir().unwrap();
@@ -111,7 +112,7 @@ fn finish(
     next: &str,
 ) -> typ_rs_store::Result<()> {
     let mut model = store.model(profile).unwrap();
-    model.apply_session(state, started_at, store.config());
+    model.apply_session(state, started_at, Corpus::bundled(), store.config());
     store.finish_session(id, state, &model, prompt(next), started_at + 60)
 }
 
@@ -192,7 +193,7 @@ fn opening_an_empty_file_runs_the_migrations_and_creates_the_default_profile() {
         .unwrap()
         .collect::<Result<_, _>>()
         .unwrap();
-    assert_eq!(versions, vec![1, 2, 3]);
+    assert_eq!(versions, vec![1, 2, 3, 4]);
 
     let tables: Vec<String> = conn
         .prepare("SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name")
@@ -231,7 +232,7 @@ fn reopening_does_not_rerun_migrations_or_duplicate_the_default_profile() {
     let profiles: i64 = conn
         .query_row("SELECT count(*) FROM profiles", [], |r| r.get(0))
         .unwrap();
-    assert_eq!((migrations, profiles), (3, 1));
+    assert_eq!((migrations, profiles), (4, 1));
 }
 
 #[test]
@@ -758,7 +759,7 @@ fn the_model_read_back_is_the_one_written_and_grows_with_each_session() {
     let (id, prompt) = start(&mut store, &profile, 1_000, "cat dog");
     let state = typed(prompt, "cat dog");
     let mut model = store.model(&profile).unwrap();
-    model.apply_session(&state, 1_000, store.config());
+    model.apply_session(&state, 1_000, Corpus::bundled(), store.config());
     store
         .finish_session(id, &state, &model, self::prompt("next"), 1_060)
         .unwrap();
@@ -809,6 +810,7 @@ fn sessions_with_no_marker_are_applied_in_start_order_when_the_store_is_next_ope
     sql(
         &path,
         "DELETE FROM pattern_stats;
+         DELETE FROM context_model;
          UPDATE sessions SET applied_model_version = NULL",
     );
     let (store, _) = open(&path);
@@ -924,4 +926,130 @@ fn an_interrupted_session_too_short_to_count_is_still_marked_applied() {
     );
     assert_eq!(marker, Some(i64::from(MODEL_VERSION)));
     assert_eq!(store.model(&profile).unwrap(), ModelState::new());
+}
+
+// --- Context model -----------------------------------------------------------
+
+/// Enough distinct words that a fit has something to work with.
+const RICH: &str = "the of and to in is you that it he was for on are as with his \
+    they at be this have from or one had by word but not what all were we when";
+
+/// Types completed sessions of `RICH`, the `i`th one `i` days in.
+fn type_completed_sessions(store: &mut Store, profile: &Profile, sessions: std::ops::Range<usize>) {
+    for i in sessions {
+        type_session(
+            store,
+            profile,
+            1_000 + i as i64 * 86_400,
+            RICH,
+            RICH,
+            "next",
+        );
+    }
+}
+
+#[test]
+fn the_context_model_row_tracks_completed_sessions_and_is_fitted_at_the_fifth() {
+    let (_dir, path) = temp_db();
+    let (mut store, profile) = open(&path);
+    assert_eq!(
+        store.model(&profile).unwrap().context_model(),
+        ModelState::new().context_model()
+    );
+
+    type_completed_sessions(&mut store, &profile, 0..4);
+    let (sessions, fitted): (i64, i64) = Connection::open(&path)
+        .unwrap()
+        .query_row(
+            "SELECT completed_sessions, fitted FROM context_model",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!((sessions, fitted), (4, 0));
+    assert_eq!(
+        store.model(&profile).unwrap().context_model().coefficients,
+        None
+    );
+
+    type_completed_sessions(&mut store, &profile, 4..5);
+    let (sessions, fitted, version): (i64, i64, i64) = Connection::open(&path)
+        .unwrap()
+        .query_row(
+            "SELECT completed_sessions, fitted, model_version FROM context_model",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )
+        .unwrap();
+    assert_eq!(
+        (sessions, fitted, version),
+        (5, 1, i64::from(MODEL_VERSION))
+    );
+    let loaded = store.model(&profile).unwrap();
+    assert!(loaded.context_model().coefficients.is_some());
+
+    // Loaded, applied to, and written back: the same as one long-lived model.
+    let mut long_lived = ModelState::new();
+    for i in 0..5 {
+        let state = typed(prompt(RICH), RICH);
+        long_lived.apply_session(
+            &state,
+            1_000 + i * 86_400,
+            Corpus::bundled(),
+            store.config(),
+        );
+    }
+    long_lived.mark_clean();
+    for (pattern, stats) in long_lived.patterns() {
+        assert_eq!(loaded.stats(pattern), Some(*stats), "{pattern:?}");
+    }
+    assert_eq!(loaded.context_model(), long_lived.context_model());
+    assert_eq!(loaded, long_lived);
+}
+
+#[test]
+fn rebuilding_reproduces_the_fitted_context_model_exactly() {
+    let (_dir, path) = temp_db();
+    {
+        let (mut store, profile) = open(&path);
+        type_completed_sessions(&mut store, &profile, 0..7);
+    }
+    let caches_before = dump_tables(&path, CACHES);
+    assert_eq!(caches_before["context_model"].len(), 1);
+
+    let (mut store, _) = open(&path);
+    assert_eq!(store.rebuild().unwrap(), 7);
+    assert_eq!(dump_tables(&path, CACHES), caches_before);
+}
+
+#[test]
+fn a_context_model_from_another_model_version_alone_triggers_a_rebuild() {
+    let (_dir, path) = temp_db();
+    {
+        let (mut store, profile) = open(&path);
+        type_completed_sessions(&mut store, &profile, 0..5);
+    }
+    let caches_before = dump_tables(&path, CACHES);
+    sql(
+        &path,
+        "UPDATE context_model SET model_version = model_version + 1, intercept = 42",
+    );
+    assert_ne!(dump_tables(&path, CACHES), caches_before);
+
+    let (store, _) = open(&path);
+    drop(store);
+    assert_eq!(dump_tables(&path, CACHES), caches_before);
+}
+
+#[test]
+fn the_model_carries_the_profile_layout_and_refuses_one_this_build_does_not_know() {
+    let (_dir, path) = temp_db();
+    let (store, profile) = open(&path);
+    assert_eq!(store.model(&profile).unwrap().layout(), Layout::QWERTY);
+
+    sql(&path, "UPDATE profiles SET layout = 'colemak'");
+    let (store, profile) = open(&path);
+    let error = store.model(&profile).unwrap_err();
+    assert!(matches!(error, Error::UnknownLayout { .. }), "{error:?}");
+    assert!(error.to_string().contains("colemak"), "{error}");
 }

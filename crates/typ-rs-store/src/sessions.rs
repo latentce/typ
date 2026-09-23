@@ -147,11 +147,12 @@ impl Store {
 
     /// Ends a session in one transaction: writes its events, sets its status
     /// from the state's outcome, writes the pattern statistics the session
-    /// changed (`model` is the profile's model with the session applied),
-    /// marks the session applied under the current model version, and stores
-    /// `next_prompt` as the prompt for the profile's next session, recorded
-    /// as composed for its own length, this corpus and model version, and
-    /// the profile's layout. A session can end only once.
+    /// changed and the context model (`model` is the profile's model with
+    /// the session applied), marks the session applied under the current
+    /// model version, and stores `next_prompt` as the prompt for the
+    /// profile's next session, recorded as composed for its own length,
+    /// this corpus and model version, and the profile's layout. A session
+    /// can end only once.
     pub fn finish_session(
         &mut self,
         id: SessionId,
@@ -184,7 +185,7 @@ impl Store {
              WHERE id = ?1",
             params![id.0, outcome.name(), ended_at, MODEL_VERSION],
         )?;
-        model::write(&tx, profile_id, model.dirty())?;
+        model::write(&tx, profile_id, model)?;
 
         let next_id = prompts::insert(&tx, profile_id, &next_prompt, ended_at)?;
         let context = Context::current(next_prompt.word_count(), &layout);

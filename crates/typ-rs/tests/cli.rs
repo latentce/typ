@@ -1,7 +1,7 @@
 use std::path::Path;
 use std::process::Command;
 
-use typ_rs_core::corpus::CORPUS_VERSION;
+use typ_rs_core::corpus::{CORPUS_VERSION, Corpus};
 use typ_rs_core::prompt::Prompt;
 use typ_rs_core::session::{EndCondition, Input, Key, SessionState};
 use typ_rs_store::{DEFAULT_PROFILE, SessionStart, Store};
@@ -67,7 +67,7 @@ fn store_session(store: &mut Store, started_at: i64, prompt: &str, script: &str)
         state.apply_event(Input::new(i as u64 * 100_000, key));
     }
     let mut model = store.model(&profile).unwrap();
-    model.apply_session(&state, started_at, store.config());
+    model.apply_session(&state, started_at, Corpus::bundled(), store.config());
     store
         .finish_session(started.id, &state, &model, words(), started_at + 60)
         .unwrap();
@@ -211,9 +211,9 @@ fn replay_shows_how_every_word_and_interval_of_a_stored_session_was_interpreted(
          4 corrections  0 uncorrected  error latency 300 ms  5 clean intervals\n\
          \n\
          words\n\
-         \x20 0 cat  first attempt \"cxt\"  history \"cxtat\"\n\
+         \x20 0 cat  first attempt \"cxt\"  history \"cxtat\"  67% raw\n\
          \x20     substitution x at 1 → \" ca\"\n\
-         \x20 1 dog  first attempt \"dog\"\n\
+         \x20 1 dog  first attempt \"dog\"  100% raw\n\
          \n\
          intervals\n\
          \x20seq       at  latency  slot  key  class\n\

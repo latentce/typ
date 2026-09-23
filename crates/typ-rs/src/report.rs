@@ -140,9 +140,9 @@ fn visible(pattern: &str) -> String {
 }
 
 /// How a stored session was interpreted: the results as the user saw them,
-/// the developer's figures, every word's first attempt and attributed
-/// errors, and every interval's classification. Words never reached are
-/// left out.
+/// the developer's figures, every word's first attempt, own raw accuracy,
+/// and attributed errors, and every interval's classification. Words never
+/// reached are left out.
 pub fn replay(session: &StoredSession, state: &SessionState, analysis: &SessionAnalysis) -> String {
     let mut out = String::new();
     let m = &analysis.metrics;
@@ -195,8 +195,11 @@ fn word_line(index: usize, word: &WordAnalysis) -> String {
     if history != word.first_attempt {
         let _ = write!(line, "  history {history:?}");
     }
-    if !word.submitted {
-        line.push_str("  (not submitted)");
+    match word.raw_accuracy() {
+        Some(raw) => {
+            let _ = write!(line, "  {:.0}% raw", 100.0 * raw);
+        }
+        None => line.push_str("  (not submitted)"),
     }
     line.push('\n');
     for error in &word.errors {
@@ -253,6 +256,7 @@ fn plural(count: usize, noun: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use typ_rs_core::corpus::Corpus;
     use typ_rs_core::prompt::Prompt;
     use typ_rs_core::session::{EndCondition, Input, Key};
 
@@ -311,15 +315,22 @@ mod tests {
     fn the_pattern_summary_lists_the_slowest_and_most_error_prone_patterns_with_evidence() {
         let config = SchedulerConfig::default();
         let mut model = ModelState::new();
-        // `t` after `a` is typed slowly (600 ms against 100 ms elsewhere) and
-        // `x` is typed for `o`, so `cat` tops slowness and `dog` errors.
-        let mut state = SessionState::new(Prompt::new(["cat", "dog"]), EndCondition::AfterWords(2));
-        let mut at = 0;
-        for c in "cat dxg ".chars() {
-            state.apply_event(Input::new(at, Key::Char(c)));
-            at += if c == 'a' { 600_000 } else { 100_000 };
-        }
-        model.apply_session(&state, 1_000, &config);
+        let session = |script: &str| {
+            let mut state =
+                SessionState::new(Prompt::new(["cat", "dog"]), EndCondition::AfterWords(2));
+            let mut at = 0;
+            for c in script.chars() {
+                state.apply_event(Input::new(at, Key::Char(c)));
+                at += if c == 'a' { 600_000 } else { 100_000 };
+            }
+            state
+        };
+        // In one clean session `t` after `a` is typed slowly (600 ms against
+        // 100 ms elsewhere), so `cat` tops slowness; in another `x` is typed
+        // for `o`, so `dog` tops errors. The second session's accuracy is
+        // too low for its latencies to count, so the slowness is untouched.
+        model.apply_session(&session("cat dog"), 1_000, Corpus::bundled(), &config);
+        model.apply_session(&session("cat dxg "), 1_000, Corpus::bundled(), &config);
 
         let summary = pattern_summary(&model, &config);
         let lines: Vec<&str> = summary.lines().collect();

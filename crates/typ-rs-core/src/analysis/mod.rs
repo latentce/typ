@@ -65,6 +65,20 @@ impl WordAnalysis {
         self.errors.iter().map(|e| e.weight).sum()
     }
 
+    /// The word's own raw accuracy: first-attempt correct characters over
+    /// its target characters, never below zero; `None` for a word not
+    /// submitted. For reporting only: how much a session's latencies count
+    /// is decided by the session's raw accuracy, never word by word.
+    pub fn raw_accuracy(&self) -> Option<f64> {
+        self.submitted
+            .then(|| self.first_attempt_correct() / self.target.chars().count() as f64)
+    }
+
+    /// Target characters less first-attempt errors, never below zero.
+    fn first_attempt_correct(&self) -> f64 {
+        (self.target.chars().count() as f64 - self.error_count()).max(0.0)
+    }
+
     /// Whether anything was typed in the word.
     pub fn reached(&self) -> bool {
         self.submitted || !self.attempt_history.is_empty()
@@ -305,9 +319,7 @@ fn session_metrics(
 ) -> SessionMetrics {
     let submitted = || words.iter().filter(|w| w.submitted);
     let target_chars: usize = submitted().map(|w| w.target.chars().count()).sum();
-    let correct: f64 = submitted()
-        .map(|w| (w.target.chars().count() as f64 - w.error_count()).max(0.0))
-        .sum();
+    let correct: f64 = submitted().map(WordAnalysis::first_attempt_correct).sum();
     let per_target_char = |count: f64| {
         if target_chars == 0 {
             0.0

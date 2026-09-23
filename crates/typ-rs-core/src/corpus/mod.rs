@@ -68,6 +68,8 @@ impl WordId {
 #[derive(Debug, Clone, PartialEq)]
 pub struct Corpus {
     words: Vec<Word>,
+    /// Every word id, ordered by word text, for lookup by text.
+    by_text: Vec<WordId>,
     characters: Vec<PatternFrequency>,
     bigrams: Vec<PatternFrequency>,
     trigrams: Vec<PatternFrequency>,
@@ -97,6 +99,14 @@ impl Corpus {
 
     pub fn text(&self, id: WordId) -> &str {
         &self.word(id).text
+    }
+
+    /// The word with exactly this text, if it is in the corpus.
+    pub fn word_by_text(&self, text: &str) -> Option<&Word> {
+        self.by_text
+            .binary_search_by(|&id| self.text(id).cmp(text))
+            .ok()
+            .map(|i| self.word(self.by_text[i]))
     }
 
     pub fn word_ids(&self) -> impl ExactSizeIterator<Item = WordId> + use<> {

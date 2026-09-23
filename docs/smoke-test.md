@@ -53,7 +53,8 @@ apart from your own history.
     session: the next `just run` shows a different prompt.
 13. **Replay.** `just run replay N` with an id from the listing. The first
     lines repeat the results the session printed; below them every word
-    shows its first attempt and the errors attributed to patterns, and every
+    shows its first attempt, its own raw accuracy, and the errors attributed
+    to patterns, and every
     keystroke its interval class. The corrections you typed in step 2 show
     as `excluded: backspace` / `replacement`, the resize as `after_resize`,
     the paste as `in_paste`, and any long pause as a hesitation.

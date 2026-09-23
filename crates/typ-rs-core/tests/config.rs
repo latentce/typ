@@ -19,6 +19,12 @@ fn the_defaults_are_the_documented_starting_points() {
         (1.0, 19.0)
     );
     assert_eq!(config.interrupted_min_clean_intervals, 20);
+    assert_eq!(config.context_refit_sessions, 5);
+    assert_eq!(config.context_ridge_lambda, 1.0);
+    assert_eq!(
+        (config.accuracy_gate_zero, config.accuracy_gate_full),
+        (0.90, 0.98)
+    );
 }
 
 #[test]
@@ -26,6 +32,7 @@ fn a_fractional_or_negative_count_is_an_error() {
     for bad in [
         r#"{"interrupted_min_clean_intervals": 2.5}"#,
         r#"{"interrupted_min_clean_intervals": -1}"#,
+        r#"{"context_refit_sessions": 0.5}"#,
     ] {
         assert!(SchedulerConfig::from_json(bad).is_err(), "{bad}");
     }
@@ -43,6 +50,10 @@ fn every_tunable_appears_by_name_in_the_json() {
         "latency_variance_prior",
         "offset_regulariser",
         "interrupted_min_clean_intervals",
+        "context_refit_sessions",
+        "context_ridge_lambda",
+        "accuracy_gate_zero",
+        "accuracy_gate_full",
     ] {
         assert!(
             json.contains(&format!("\"{key}\":")),

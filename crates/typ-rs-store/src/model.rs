@@ -1,5 +1,5 @@
-//! The pattern statistics cache: a profile's model as rows, and keeping it
-//! in step with the stored sessions.
+//! The pattern statistics and context model caches: a profile's model as
+//! rows, and keeping it in step with the stored sessions.
 //!
 //! Every ended session is applied to its profile's model exactly once;
 //! `sessions.applied_model_version` records that it was, and under which
@@ -13,13 +13,17 @@ use std::collections::BTreeMap;
 use std::collections::btree_map::Entry;
 
 use rusqlite::{Connection, TransactionBehavior, params};
-use typ_rs_core::model::{MODEL_VERSION, ModelState, PatternStats, SchedulerConfig};
+use typ_rs_core::corpus::Corpus;
+use typ_rs_core::layout::Layout;
+use typ_rs_core::model::context::{Coefficients, FEATURE_COUNT, Feature, Features};
+use typ_rs_core::model::{ContextModel, MODEL_VERSION, ModelState, PatternStats, SchedulerConfig};
 
 use crate::sessions::load_sessions;
-use crate::{Profile, Result, Store};
+use crate::{Error, Profile, Result, Store};
 
 impl Store {
-    /// The profile's pattern statistics as last written.
+    /// The profile's pattern statistics and context model as last written,
+    /// for the layout the profile is bound to.
     pub fn model(&self, profile: &Profile) -> Result<ModelState> {
         load(&self.conn, profile.id)
     }
@@ -32,7 +36,8 @@ impl Store {
         self.in_transaction(|tx| {
             tx.execute_batch(
                 "UPDATE sessions SET applied_model_version = NULL;
-                 DELETE FROM pattern_stats",
+                 DELETE FROM pattern_stats;
+                 DELETE FROM context_model",
             )?;
             apply_unmarked(tx, &config)
         })
@@ -45,6 +50,7 @@ impl Store {
     pub(crate) fn reconcile(&mut self) -> Result<()> {
         let stale: bool = self.conn.query_row(
             "SELECT EXISTS (SELECT 1 FROM pattern_stats WHERE model_version <> ?1)
+                 OR EXISTS (SELECT 1 FROM context_model WHERE model_version <> ?1)
                  OR EXISTS (SELECT 1 FROM sessions
                             WHERE applied_model_version IS NOT NULL
                               AND applied_model_version <> ?1)",
@@ -88,29 +94,68 @@ fn apply_unmarked(conn: &Connection, config: &SchedulerConfig) -> Result<usize> 
          ORDER BY s.started_at, s.id",
         [],
     )?;
+    let corpus = Corpus::bundled();
     let mut models: BTreeMap<i64, ModelState> = BTreeMap::new();
     for session in &pending {
         let model = match models.entry(session.profile_id) {
             Entry::Occupied(model) => model.into_mut(),
             Entry::Vacant(slot) => slot.insert(load(conn, session.profile_id)?),
         };
-        model.apply_session(&session.replay(), session.started_at, config);
+        model.apply_session(&session.replay(), session.started_at, corpus, config);
         conn.execute(
             "UPDATE sessions SET applied_model_version = ?2 WHERE id = ?1",
             params![session.id.raw(), MODEL_VERSION],
         )?;
     }
     for (profile_id, model) in &models {
-        write(conn, *profile_id, model.dirty())?;
+        write(conn, *profile_id, model)?;
     }
     Ok(pending.len())
 }
 
+/// The feature columns, in feature order, as they appear in both caches.
+fn feature_columns() -> String {
+    Feature::ALL
+        .iter()
+        .map(|f| f.name())
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// `?first, ?first+1, ...`: one placeholder per feature column, numbered
+/// on from the `first - 1` fixed columns before them.
+fn feature_placeholders(first: usize) -> String {
+    (first..first + FEATURE_COUNT)
+        .map(|i| format!("?{i}"))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// Reads the feature columns, which start at column index `first`.
+fn read_features(row: &rusqlite::Row<'_>, first: usize) -> rusqlite::Result<Features> {
+    let mut features = [0.0; FEATURE_COUNT];
+    for (i, f) in features.iter_mut().enumerate() {
+        *f = row.get(first + i)?;
+    }
+    Ok(features)
+}
+
 pub(crate) fn load(conn: &Connection, profile_id: i64) -> Result<ModelState> {
-    let mut stmt = conn.prepare_cached(
-        "SELECT pattern, s0, s1, s2, w2, c, e, h, last_update
-         FROM pattern_stats WHERE profile_id = ?1",
+    let (name, layout): (String, String) = conn.query_row(
+        "SELECT name, layout FROM profiles WHERE id = ?1",
+        [profile_id],
+        |row| Ok((row.get(0)?, row.get(1)?)),
     )?;
+    let layout = Layout::by_name(&layout).ok_or_else(|| Error::UnknownLayout {
+        profile: name,
+        layout,
+    })?;
+
+    let mut stmt = conn.prepare_cached(&format!(
+        "SELECT pattern, s0, s1, s2, w2, c, e, h, last_update, {}
+         FROM pattern_stats WHERE profile_id = ?1",
+        feature_columns()
+    ))?;
     let rows = stmt
         .query_map([profile_id], |row| {
             Ok((
@@ -124,42 +169,95 @@ pub(crate) fn load(conn: &Connection, profile_id: i64) -> Result<ModelState> {
                     e: row.get(6)?,
                     h: row.get(7)?,
                     last_update: row.get(8)?,
+                    features: read_features(row, 9)?,
                 },
             ))
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
-    Ok(ModelState::from_rows(rows))
+
+    let context = conn
+        .prepare_cached(&format!(
+            "SELECT completed_sessions, fitted, intercept, {}
+             FROM context_model WHERE profile_id = ?1",
+            feature_columns()
+        ))?
+        .query_row([profile_id], |row| {
+            let completed_sessions: u32 = row.get(0)?;
+            let fitted: bool = row.get(1)?;
+            let coefficients = fitted.then_some(Coefficients {
+                intercept: row.get(2)?,
+                weights: read_features(row, 3)?,
+            });
+            Ok(ContextModel {
+                completed_sessions,
+                coefficients,
+            })
+        })
+        .or_else(|e| match e {
+            rusqlite::Error::QueryReturnedNoRows => Ok(ContextModel::default()),
+            e => Err(e),
+        })?;
+
+    Ok(ModelState::from_rows(layout, rows, context))
 }
 
-/// Writes the given patterns' rows, stamped with the current model version.
-pub(crate) fn write<'a>(
-    conn: &Connection,
-    profile_id: i64,
-    rows: impl Iterator<Item = (&'a str, &'a PatternStats)>,
-) -> Result<()> {
-    let mut upsert = conn.prepare_cached(
+/// Writes the model's changed pattern rows and its context model, stamped
+/// with the current model version.
+pub(crate) fn write(conn: &Connection, profile_id: i64, model: &ModelState) -> Result<()> {
+    let columns = feature_columns();
+    let updates: Vec<String> = Feature::ALL
+        .iter()
+        .map(|f| format!("{0} = excluded.{0}", f.name()))
+        .collect();
+    let mut upsert = conn.prepare_cached(&format!(
         "INSERT INTO pattern_stats
-             (profile_id, pattern, s0, s1, s2, w2, c, e, h, last_update, model_version)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
+             (profile_id, pattern, s0, s1, s2, w2, c, e, h, last_update, model_version, {columns})
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, {})
          ON CONFLICT (profile_id, pattern) DO UPDATE SET
              s0 = excluded.s0, s1 = excluded.s1, s2 = excluded.s2, w2 = excluded.w2,
              c = excluded.c, e = excluded.e, h = excluded.h,
-             last_update = excluded.last_update, model_version = excluded.model_version",
-    )?;
-    for (pattern, s) in rows {
-        upsert.execute(params![
-            profile_id,
-            pattern,
-            s.s0,
-            s.s1,
-            s.s2,
-            s.w2,
-            s.c,
-            s.e,
-            s.h,
-            s.last_update,
-            MODEL_VERSION,
-        ])?;
+             last_update = excluded.last_update, model_version = excluded.model_version,
+             {}",
+        feature_placeholders(12),
+        updates.join(", "),
+    ))?;
+    for (pattern, s) in model.dirty() {
+        let mut values: Vec<rusqlite::types::Value> = vec![
+            profile_id.into(),
+            pattern.to_string().into(),
+            s.s0.into(),
+            s.s1.into(),
+            s.s2.into(),
+            s.w2.into(),
+            s.c.into(),
+            s.e.into(),
+            s.h.into(),
+            s.last_update.into(),
+            MODEL_VERSION.into(),
+        ];
+        values.extend(s.features.iter().map(|&f| f.into()));
+        upsert.execute(rusqlite::params_from_iter(values))?;
     }
+
+    let context = model.context_model();
+    let coefficients = context.coefficients.unwrap_or(Coefficients {
+        intercept: 0.0,
+        weights: [0.0; FEATURE_COUNT],
+    });
+    let mut values: Vec<rusqlite::types::Value> = vec![
+        profile_id.into(),
+        context.completed_sessions.into(),
+        context.coefficients.is_some().into(),
+        coefficients.intercept.into(),
+        MODEL_VERSION.into(),
+    ];
+    values.extend(coefficients.weights.iter().map(|&w| w.into()));
+    conn.prepare_cached(&format!(
+        "INSERT OR REPLACE INTO context_model
+             (profile_id, completed_sessions, fitted, intercept, model_version, {columns})
+         VALUES (?1, ?2, ?3, ?4, ?5, {})",
+        feature_placeholders(6)
+    ))?
+    .execute(rusqlite::params_from_iter(values))?;
     Ok(())
 }

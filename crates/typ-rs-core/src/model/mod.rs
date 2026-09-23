@@ -6,27 +6,38 @@
 //! [`ModelState::apply_session`], which classifies its intervals against the
 //! baseline in force at its start, estimates how fast or slow the session
 //! was as a whole, and then adds every clean latency, hesitation, and
-//! first-attempt outcome to the chain of the pattern it belongs to.
-//! Estimates ([`ModelState::estimate`]) shrink each pattern toward its
-//! parent, so they are defined before a pattern has any evidence of its own.
+//! first-attempt outcome to the chain of the pattern it belongs to. How
+//! much a session's latencies count depends on its raw accuracy: speed
+//! bought by accepting errors is not speed. Estimates
+//! ([`ModelState::estimate`]) shrink each pattern toward its parent, so they
+//! are defined before a pattern has any evidence of its own, and separate
+//! what the pattern's physical and positional context explains
+//! ([`context`]) from what is left as the user's own weakness.
 //!
 //! Everything here is a cache of the stored sessions: applying the same
-//! sessions in the same order to an empty model reproduces it exactly.
+//! sessions in the same order to an empty model reproduces it exactly,
+//! context model included, because the model is refitted at fixed points
+//! in that sequence and nowhere else.
 
 mod config;
+pub mod context;
 
 use std::collections::{BTreeMap, BTreeSet};
 
 pub use config::{ConfigError, SchedulerConfig};
+pub use context::ContextModel;
 
 use crate::analysis::{HesitationThreshold, IntervalClass, SessionAnalysis, analyze_with, median};
+use crate::corpus::Corpus;
+use crate::layout::Layout;
 use crate::prompt::Slot;
 use crate::session::{EventKind, Outcome, SessionState};
+use context::{Aggregate, Coefficients, Features, slot_features};
 
 /// Identifies the analysis and scheduling algorithm. Bump whenever anything
 /// that feeds a cache changes; every cache is stamped with it and rebuilt
 /// from the stored sessions when it differs.
-pub const MODEL_VERSION: u32 = 1;
+pub const MODEL_VERSION: u32 = 2;
 
 /// The pattern text of the root of the chain: the user as a whole.
 pub const ROOT: &str = "";
@@ -36,8 +47,10 @@ const SECONDS_PER_DAY: f64 = 86_400.0;
 /// The decaying sums kept for one pattern. Latency sums are over the
 /// session-adjusted log-latency residual `x` (for the root, over log-latency
 /// itself, so that its mean is the user baseline); outcome sums count
-/// first-attempt slots. All decay toward zero with the pattern's half-life,
-/// measured from `last_update`.
+/// first-attempt slots. Latencies and hesitations are speed evidence and
+/// enter at their session's accuracy factor; outcomes enter in full. All
+/// decay toward zero with the pattern's half-life, measured from
+/// `last_update`.
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub struct PatternStats {
     /// Total weight of latency observations.
@@ -48,11 +61,15 @@ pub struct PatternStats {
     pub s2: f64,
     /// Sum of squared weights, for the effective sample size.
     pub w2: f64,
+    /// Weighted sums of each context feature over the latency observations,
+    /// so that `features / s0` is the pattern's mean context. For the root,
+    /// the user's typical context.
+    pub features: Features,
     /// First-attempt slots typed correctly.
     pub c: f64,
     /// First-attempt errors.
     pub e: f64,
-    /// Hesitations.
+    /// Total weight of hesitations.
     pub h: f64,
     /// When the sums were last decayed to, Unix seconds.
     pub last_update: i64,
@@ -80,6 +97,9 @@ impl PatternStats {
             self.s1 *= w;
             self.s2 *= w;
             self.w2 *= w * w;
+            for f in &mut self.features {
+                *f *= w;
+            }
             self.c *= w;
             self.e *= w;
             self.h *= w;
@@ -88,11 +108,20 @@ impl PatternStats {
         self
     }
 
-    fn observe_latency(&mut self, x: f64, weight: f64) {
+    /// The pattern's mean context over its latency observations; `None`
+    /// without any.
+    pub fn mean_features(&self) -> Option<Features> {
+        (self.s0 > 0.0).then(|| std::array::from_fn(|i| self.features[i] / self.s0))
+    }
+
+    fn observe_latency(&mut self, x: f64, weight: f64, features: &Features) {
         self.s0 += weight;
         self.s1 += weight * x;
         self.s2 += weight * x * x;
         self.w2 += weight * weight;
+        for (sum, f) in self.features.iter_mut().zip(features) {
+            *sum += weight * f;
+        }
     }
 
     fn observe_outcome(&mut self, correct: f64, error: f64) {
@@ -100,8 +129,8 @@ impl PatternStats {
         self.e += error;
     }
 
-    fn observe_hesitation(&mut self) {
-        self.h += 1.0;
+    fn observe_hesitation(&mut self, weight: f64) {
+        self.h += weight;
     }
 }
 
@@ -111,21 +140,34 @@ impl PatternStats {
 pub struct PatternEstimate {
     /// The posterior mean of the pattern's log-latency residual: how much
     /// slower (positive) or faster than the user baseline its slot is typed.
+    /// What the pattern costs the user, context and all.
     pub absolute_slowness: f64,
+    /// The part of that explained by the pattern's typical context: where
+    /// it sits in its words and what the fingers must do to reach it. Zero
+    /// until the context model has been fitted; a pattern with no latency
+    /// evidence of its own takes its parent's.
+    pub context_effect: f64,
+    /// What is left of the slowness once the context effect is removed: the
+    /// speed component of the user's weakness on the pattern.
+    pub pattern_effect: f64,
     /// The posterior variance of the residual around that mean.
     pub variance: f64,
     /// The probability that the slot is wrong on the first attempt.
     pub error_probability: f64,
-    /// The share of the slot's eligible intervals that were hesitations.
+    /// The share of the slot's eligible intervals (clean or hesitation, by
+    /// weight) that were hesitations.
     pub hesitation_rate: f64,
     pub n_eff: f64,
 }
 
-/// Every pattern's statistics for one profile.
+/// Every pattern's statistics for one profile, with the layout its context
+/// features are read from and the context model fitted to them.
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct ModelState {
+    layout: Layout,
     patterns: BTreeMap<Box<str>, PatternStats>,
     dirty: BTreeSet<Box<str>>,
+    context: ContextModel,
 }
 
 /// What applying a session did.
@@ -147,22 +189,44 @@ pub struct AppliedObservations {
     /// session had no clean interval at all.
     pub user_baseline: Option<f64>,
     /// How much faster or slower than the baseline the session was, in
-    /// log-latency.
+    /// log-latency, once the context of its slots is accounted for.
     pub session_offset: f64,
+    /// The weight every latency and hesitation of the session entered
+    /// with: zero at or below the accuracy gate, one from its top.
+    pub accuracy_factor: f64,
     pub clean_intervals: usize,
 }
 
 impl ModelState {
+    /// An empty model for the default layout.
     pub fn new() -> ModelState {
         ModelState::default()
     }
 
     /// Rebuilds a model from stored rows.
-    pub fn from_rows(rows: impl IntoIterator<Item = (Box<str>, PatternStats)>) -> ModelState {
+    pub fn from_rows(
+        layout: Layout,
+        rows: impl IntoIterator<Item = (Box<str>, PatternStats)>,
+        context: ContextModel,
+    ) -> ModelState {
         ModelState {
+            layout,
             patterns: rows.into_iter().collect(),
             dirty: BTreeSet::new(),
+            context,
         }
+    }
+
+    /// The layout the model's context features are read from: the one the
+    /// profile is bound to.
+    pub fn layout(&self) -> Layout {
+        self.layout
+    }
+
+    /// The context model as last fitted, and how many completed sessions
+    /// have been applied.
+    pub fn context_model(&self) -> &ContextModel {
+        &self.context
     }
 
     /// The stored sums of a pattern, as last updated; `None` for a pattern
@@ -218,8 +282,13 @@ impl ModelState {
         let k = config.kappa;
         let mean = (s.s1 + k * parent.absolute_slowness) / (s.s0 + k);
         let spread = s.s2 - 2.0 * mean * s.s1 + mean * mean * s.s0;
+        let context_effect = s
+            .mean_features()
+            .map_or(parent.context_effect, |f| self.context.effect(&f));
         PatternEstimate {
             absolute_slowness: mean,
+            context_effect,
+            pattern_effect: mean - context_effect,
             variance: (spread + k * parent.variance) / (s.s0 + k),
             error_probability: (s.e + k * parent.error_probability) / (s.c + s.e + k),
             hesitation_rate: (s.h + k * parent.hesitation_rate) / (s.s0 + s.h + k),
@@ -244,6 +313,8 @@ impl ModelState {
         let prior_trials = config.root_prior_errors + config.root_prior_correct;
         PatternEstimate {
             absolute_slowness: 0.0,
+            context_effect: 0.0,
+            pattern_effect: 0.0,
             variance: (spread + k * config.latency_variance_prior) / (s.s0 + k),
             error_probability: (s.e + prior_errors) / (s.c + s.e + prior_trials),
             hesitation_rate: (s.h + prior_errors) / (s.s0 + s.h + prior_trials),
@@ -255,10 +326,15 @@ impl ModelState {
     /// into the model. Every pattern touched is decayed to `started_at`
     /// first, so what an observation adds depends on the time elapsed since
     /// the pattern was last seen, not on how many sessions came between.
+    /// The corpus supplies the word frequencies of the prompt's slots. A
+    /// completed session advances the fit cadence and, on every
+    /// `context_refit_sessions`th one, the context model is refitted to the
+    /// bigram statistics as they then stand.
     pub fn apply_session(
         &mut self,
         state: &SessionState,
         started_at: i64,
+        corpus: &Corpus,
         config: &SchedulerConfig,
     ) -> SessionUpdate {
         let snapshot = self.user_baseline();
@@ -268,13 +344,18 @@ impl ModelState {
         );
         let analysis = analyze_with(state, threshold);
 
-        let clean: Vec<(&str, f64)> = analysis
+        let prompt = state.prompt();
+        let clean: Vec<CleanInterval> = analysis
             .intervals
             .iter()
             .filter(|i| i.class == IntervalClass::Clean)
             .filter_map(|i| {
                 let micros = i.latency_micros?;
-                Some((i.pattern.as_ref(), (micros as f64 / 1_000_000.0).ln()))
+                Some(CleanInterval {
+                    pattern: &i.pattern,
+                    log_latency: (micros as f64 / 1_000_000.0).ln(),
+                    features: slot_features(prompt, i.slot, self.layout, corpus),
+                })
             })
             .collect();
         let completed = state.outcome() == Some(Outcome::Completed);
@@ -285,13 +366,17 @@ impl ModelState {
             };
         }
 
+        let accuracy_factor = accuracy_factor(analysis.metrics.raw_accuracy, config);
         let baseline = snapshot.or_else(|| {
-            let mut sorted: Vec<f64> = clean.iter().map(|&(_, l)| l).collect();
+            let mut sorted: Vec<f64> = clean.iter().map(|c| c.log_latency).collect();
             sorted.sort_by(f64::total_cmp);
             median(&sorted, |a, b| (a + b) / 2.0)
         });
         let session_offset = baseline.map_or(0.0, |b| {
-            let mut residuals: Vec<f64> = clean.iter().map(|&(_, l)| l - b).collect();
+            let mut residuals: Vec<f64> = clean
+                .iter()
+                .map(|c| c.log_latency - b - self.context.effect(&c.features))
+                .collect();
             residuals.sort_by(f64::total_cmp);
             let n = residuals.len() as f64;
             median(&residuals, |a, b| (a + b) / 2.0).unwrap_or(0.0) * n
@@ -303,19 +388,29 @@ impl ModelState {
             at: started_at,
             config,
         };
-        for &(pattern, log_latency) in &clean {
+        for c in &clean {
             let baseline = baseline.expect("a clean interval implies a baseline");
-            let x = log_latency - baseline - session_offset;
-            observer.chain(pattern, |s| s.observe_latency(x, 1.0));
-            observer.root(|s| s.observe_latency(log_latency, 1.0));
+            let x = c.log_latency - baseline - session_offset;
+            observer.chain(c.pattern, |s| {
+                s.observe_latency(x, accuracy_factor, &c.features)
+            });
+            observer.root(|s| s.observe_latency(c.log_latency, accuracy_factor, &c.features));
         }
         for interval in &analysis.intervals {
             if matches!(interval.class, IntervalClass::Hesitation { .. }) {
-                observer.chain(&interval.pattern, PatternStats::observe_hesitation);
-                observer.root(PatternStats::observe_hesitation);
+                observer.chain(&interval.pattern, |s| s.observe_hesitation(accuracy_factor));
+                observer.root(|s| s.observe_hesitation(accuracy_factor));
             }
         }
         observer.outcomes(state, &analysis);
+
+        if completed {
+            self.context.completed_sessions += 1;
+            let cadence = config.context_refit_sessions;
+            if cadence > 0 && self.context.completed_sessions as usize % cadence == 0 {
+                self.refit_context(started_at, config);
+            }
+        }
 
         let clean_intervals = clean.len();
         SessionUpdate {
@@ -323,8 +418,30 @@ impl ModelState {
             applied: Some(AppliedObservations {
                 user_baseline: baseline,
                 session_offset,
+                accuracy_factor,
                 clean_intervals,
             }),
+        }
+    }
+
+    /// Refits the context model to every bigram with latency evidence, as
+    /// of `at`. A fit with no bigram evidence leaves the coefficients as
+    /// they were.
+    fn refit_context(&mut self, at: i64, config: &SchedulerConfig) {
+        let aggregates = self
+            .patterns
+            .iter()
+            .filter(|(pattern, _)| pattern.chars().count() == 2)
+            .filter_map(|(_, s)| {
+                let s = s.decayed_to(at, config.pattern_half_life_days);
+                Some(Aggregate {
+                    weight: s.s0,
+                    features: s.mean_features()?,
+                    residual: s.s1 / s.s0,
+                })
+            });
+        if let Some(coefficients) = Coefficients::fit(aggregates, config.context_ridge_lambda) {
+            self.context.coefficients = Some(coefficients);
         }
     }
 
@@ -344,6 +461,25 @@ impl ModelState {
         *stats = stats.decayed_to(at, half_life_days);
         f(stats);
         self.dirty.insert(pattern.into());
+    }
+}
+
+/// One clean interval of a session: where its latency is recorded and the
+/// context it was typed in.
+struct CleanInterval<'a> {
+    pattern: &'a str,
+    log_latency: f64,
+    features: Features,
+}
+
+/// How much a session's speed evidence counts: `clamp((raw − zero) / (full −
+/// zero), 0, 1)`, a step at the gate if it has no width.
+fn accuracy_factor(raw_accuracy: f64, config: &SchedulerConfig) -> f64 {
+    let width = config.accuracy_gate_full - config.accuracy_gate_zero;
+    if width <= 0.0 {
+        f64::from(raw_accuracy > config.accuracy_gate_zero)
+    } else {
+        ((raw_accuracy - config.accuracy_gate_zero) / width).clamp(0.0, 1.0)
     }
 }
 
