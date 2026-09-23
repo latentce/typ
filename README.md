@@ -55,6 +55,17 @@ frequency-weighted distribution so improvement can be measured on material
 the scheduler never touched. After each session the results block ends with
 `next:` and the patterns the next prompt will practise.
 
+Targeted words are chosen so that every target gets a dose of about six
+exposures spread across varied words: each pick weighs how much coverage a
+word adds against how common it is, and marks down words you were drilled on
+in the last five sessions, words that stack more than three targets, and
+words over ten characters. No targeted word appears twice in a prompt, and
+two words exposing the same target are kept apart so you are not drilling
+one motion in consecutive words. Probes are never filtered, so a word you are
+practising can turn up as a probe; instead each probe records whether it or
+its patterns were targeted recently, so later analysis can tell clean
+transfer evidence from contaminated.
+
 `typ stats` lists your recent completed
 sessions with their ids, then the ten patterns you are slowest on relative to
 your baseline, the ten you most often get wrong, each with how much
@@ -65,9 +76,7 @@ all of them from your stored sessions, and an upgrade that changes the
 algorithm does so automatically. `typ replay <id>` shows how a stored session
 was interpreted: each word's first attempt, its own raw accuracy, and the
 patterns its errors count against, and which keystroke intervals count as
-clean motor evidence. Word selection is still a simple picker (one word
-containing each target in turn); coverage-based selection and probe
-contamination tracking are being built on top of this.
+clean motor evidence.
 
 ```
 $ typ --version

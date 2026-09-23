@@ -1,7 +1,7 @@
 //! Prompt rows, the patterns selected for them, and the cached next prompt.
 
 use rusqlite::{Connection, OptionalExtension, params};
-use typ_rs_core::compose::ComposedPrompt;
+use typ_rs_core::compose::{ComposedPrompt, ComposedWord, Contamination, WordRole};
 use typ_rs_core::corpus::CORPUS_VERSION;
 use typ_rs_core::model::MODEL_VERSION;
 use typ_rs_core::prompt::Prompt;
@@ -33,8 +33,9 @@ impl Context {
     }
 }
 
-/// Inserts a prompt with its words, each with its role and the targets it
-/// exposes, and every pattern selected for it.
+/// Inserts a prompt with its words, each with its role, the targets it
+/// exposes, its selection score if targeted, and its contamination if a
+/// probe assessed for it, and every pattern selected for the prompt.
 pub(crate) fn insert(
     conn: &Connection,
     profile_id: i64,
@@ -54,8 +55,9 @@ pub(crate) fn insert(
     let prompt_id = conn.last_insert_rowid();
 
     let mut insert_word = conn.prepare_cached(
-        "INSERT INTO prompt_words (prompt_id, word_index, word, role, exposed_targets)
-         VALUES (?1, ?2, ?3, ?4, ?5)",
+        "INSERT INTO prompt_words
+             (prompt_id, word_index, word, role, exposed_targets, selection_score, contamination)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
     )?;
     for (index, (word, meta)) in composed
         .prompt
@@ -64,12 +66,18 @@ pub(crate) fn insert(
         .zip(&composed.words)
         .enumerate()
     {
+        let contamination = meta
+            .contamination
+            .as_ref()
+            .map(|c| contamination_json(c, &composed.words, index));
         insert_word.execute(params![
             prompt_id,
             index as i64,
             word.as_ref(),
             meta.role.name(),
             json_strings(&meta.exposed_targets),
+            meta.selection_score,
+            contamination,
         ])?;
     }
 
@@ -94,11 +102,30 @@ pub(crate) fn insert(
 
 /// A JSON array of the given strings.
 fn json_strings(items: &[Box<str>]) -> String {
-    let quoted: Vec<String> = items
-        .iter()
-        .map(|s| format!("\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\"")))
-        .collect();
+    let quoted: Vec<String> = items.iter().map(|s| json_string(s)).collect();
     format!("[{}]", quoted.join(","))
+}
+
+/// A JSON string literal.
+fn json_string(s: &str) -> String {
+    format!("\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\""))
+}
+
+/// A probe's contamination as stored: the roles of the words either side
+/// of it (`null` at the prompt's edges), whether the word itself was
+/// recently targeted, and which of its patterns were.
+fn contamination_json(c: &Contamination, words: &[ComposedWord], index: usize) -> String {
+    let role = |i: Option<usize>| {
+        i.and_then(|i| words.get(i))
+            .map_or("null".to_string(), |w| json_string(w.role.name()))
+    };
+    format!(
+        "{{\"before\":{},\"after\":{},\"recent_word\":{},\"recent_patterns\":{}}}",
+        role(index.checked_sub(1)),
+        role(Some(index + 1)),
+        c.recently_targeted_word,
+        json_strings(&c.recently_targeted_patterns),
+    )
 }
 
 pub(crate) fn load(conn: &Connection, prompt_id: i64) -> Result<Prompt> {
@@ -110,6 +137,20 @@ pub(crate) fn load(conn: &Connection, prompt_id: i64) -> Result<Prompt> {
         return Err(Error::Corrupt(format!("prompt {prompt_id} has no words")));
     }
     Ok(Prompt::new(words))
+}
+
+/// The prompt's words shown as targeted, in prompt order.
+pub(crate) fn load_targeted_words(conn: &Connection, prompt_id: i64) -> Result<Vec<Box<str>>> {
+    let words = conn
+        .prepare_cached(
+            "SELECT word FROM prompt_words
+             WHERE prompt_id = ?1 AND role = ?2 ORDER BY word_index",
+        )?
+        .query_map(params![prompt_id, WordRole::Targeted.name()], |row| {
+            row.get::<_, String>(0).map(String::into_boxed_str)
+        })?
+        .collect::<rusqlite::Result<_>>()?;
+    Ok(words)
 }
 
 /// The patterns selected for a prompt, targets first in the order they
@@ -162,15 +203,31 @@ pub(crate) fn dose(value: i64, column: &str) -> Result<usize> {
     usize::try_from(value).map_err(|_| Error::Corrupt(format!("{column} {value} is negative")))
 }
 
+/// What a stored prompt carries into the session that shows it.
+pub(crate) struct LoadedPrompt {
+    pub id: i64,
+    pub prompt: Prompt,
+    pub targets: Vec<SelectedTarget>,
+    pub targeted_words: Vec<Box<str>>,
+}
+
+pub(crate) fn load_prompt(conn: &Connection, prompt_id: i64) -> Result<LoadedPrompt> {
+    Ok(LoadedPrompt {
+        id: prompt_id,
+        prompt: load(conn, prompt_id)?,
+        targets: load_targets(conn, prompt_id)?,
+        targeted_words: load_targeted_words(conn, prompt_id)?,
+    })
+}
+
 /// Removes the prompt composed for the profile's next session, if one is
-/// waiting, and returns it with its targets if it was composed for
-/// `wanted`. A prompt composed for another context is discarded: the caller
-/// composes afresh.
+/// waiting, and returns it if it was composed for `wanted`. A prompt
+/// composed for another context is discarded: the caller composes afresh.
 pub(crate) fn take_next(
     conn: &Connection,
     profile_id: i64,
     wanted: &Context,
-) -> Result<Option<(i64, Prompt, Vec<SelectedTarget>)>> {
+) -> Result<Option<LoadedPrompt>> {
     let waiting: Option<(i64, i64, u32, u32, String)> = conn
         .query_row(
             "DELETE FROM next_prompt WHERE profile_id = ?1
@@ -199,18 +256,15 @@ pub(crate) fn take_next(
         layout,
     };
     if composed_for == *wanted {
-        Ok(Some((id, load(conn, id)?, load_targets(conn, id)?)))
+        Ok(Some(load_prompt(conn, id)?))
     } else {
         Ok(None)
     }
 }
 
-/// The targets of the prompt waiting for the profile's next session;
-/// `None` when no prompt is waiting. The prompt stays waiting.
-pub(crate) fn next_targets(
-    conn: &Connection,
-    profile_id: i64,
-) -> Result<Option<Vec<SelectedTarget>>> {
+/// The prompt waiting for the profile's next session; `None` when no
+/// prompt is waiting. The prompt stays waiting.
+pub(crate) fn next_waiting(conn: &Connection, profile_id: i64) -> Result<Option<LoadedPrompt>> {
     let waiting: Option<i64> = conn
         .query_row(
             "SELECT prompt_id FROM next_prompt WHERE profile_id = ?1",
@@ -218,7 +272,7 @@ pub(crate) fn next_targets(
             |row| row.get(0),
         )
         .optional()?;
-    waiting.map(|id| load_targets(conn, id)).transpose()
+    waiting.map(|id| load_prompt(conn, id)).transpose()
 }
 
 pub(crate) fn set_next(

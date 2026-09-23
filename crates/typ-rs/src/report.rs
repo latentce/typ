@@ -477,6 +477,7 @@ mod tests {
                 target: target("og", TargetRole::Deferred),
                 achieved_dose: 0,
             }],
+            [],
             &config,
         );
         let summary = pattern_summary(&model, Corpus::bundled(), &config, &history);

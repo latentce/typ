@@ -11,8 +11,8 @@ use crate::{Profile, Result, Store};
 
 impl Store {
     /// The profile's training history: every ended session's training
-    /// events replayed in session order. This is what the next prompt is
-    /// composed against.
+    /// events and targeted words replayed in session order. This is what
+    /// the next prompt is composed against.
     pub fn training_history(&self, profile: &Profile) -> Result<TrainingHistory> {
         load_history(&self.conn, profile.id, &self.config)
     }
@@ -27,80 +27,78 @@ impl Store {
         profile: &Profile,
     ) -> Result<TrainingHistory> {
         let mut history = self.training_history(profile)?;
-        if let Some(targets) = prompts::next_targets(&self.conn, profile.id)? {
-            let events: Vec<TrainingEvent> = targets
+        if let Some(waiting) = prompts::next_waiting(&self.conn, profile.id)? {
+            let events: Vec<TrainingEvent> = waiting
+                .targets
                 .into_iter()
                 .map(|target| TrainingEvent {
                     target,
                     achieved_dose: 0,
                 })
                 .collect();
-            history.record(&events, &self.config);
+            history.record(
+                &events,
+                waiting.targeted_words.iter().map(AsRef::as_ref),
+                &self.config,
+            );
         }
         Ok(history)
     }
 }
 
 /// Replays the profile's ended sessions, oldest first, each with its
-/// events; a session with none still counts as a session.
+/// events and the words its prompt showed as targeted; a session with
+/// neither still counts as a session.
 fn load_history(
     conn: &Connection,
     profile_id: i64,
     config: &SchedulerConfig,
 ) -> Result<TrainingHistory> {
-    let mut stmt = conn.prepare_cached(
-        "SELECT s.id, e.pattern, e.role, e.weakness_mean, e.weakness_sd,
-                e.priority, e.planned_dose, e.achieved_dose
-         FROM sessions s
-         LEFT JOIN pattern_training_events e ON e.session_id = s.id
-         WHERE s.profile_id = ?1 AND s.ended_at IS NOT NULL
-         ORDER BY s.started_at, s.id, e.rowid",
-    )?;
-    let rows = stmt.query_map([profile_id], |row| {
-        let session: i64 = row.get(0)?;
-        let pattern: Option<String> = row.get(1)?;
-        let columns = match pattern {
-            Some(pattern) => Some((
-                TargetColumns {
-                    pattern,
-                    role: row.get(2)?,
-                    weakness_mean: row.get(3)?,
-                    weakness_sd: row.get(4)?,
-                    priority: row.get(5)?,
-                    planned_dose: row.get(6)?,
-                },
-                row.get::<_, i64>(7)?,
-            )),
-            None => None,
-        };
-        Ok((session, columns))
-    })?;
+    let sessions: Vec<(i64, i64)> = conn
+        .prepare_cached(
+            "SELECT id, prompt_id FROM sessions
+             WHERE profile_id = ?1 AND ended_at IS NOT NULL
+             ORDER BY started_at, id",
+        )?
+        .query_map([profile_id], |row| Ok((row.get(0)?, row.get(1)?)))?
+        .collect::<rusqlite::Result<_>>()?;
 
     let mut history = TrainingHistory::new();
-    let mut current: Option<(i64, Vec<TrainingEvent>)> = None;
-    for row in rows {
-        let (session, columns) = row?;
-        let event = match columns {
-            Some((target, achieved)) => Some(TrainingEvent {
-                target: target.decode()?,
-                achieved_dose: dose(achieved, "achieved_dose")?,
-            }),
-            None => None,
-        };
-        match &mut current {
-            Some((id, events)) if *id == session => events.extend(event),
-            _ => {
-                if let Some((_, events)) = current.take() {
-                    history.record(&events, config);
-                }
-                current = Some((session, event.into_iter().collect()));
-            }
-        }
-    }
-    if let Some((_, events)) = current {
-        history.record(&events, config);
+    for (session_id, prompt_id) in sessions {
+        let events = load_events(conn, session_id)?;
+        let targeted_words = prompts::load_targeted_words(conn, prompt_id)?;
+        history.record(&events, targeted_words.iter().map(AsRef::as_ref), config);
     }
     Ok(history)
+}
+
+/// One session's training events in the order they were written.
+fn load_events(conn: &Connection, session_id: i64) -> Result<Vec<TrainingEvent>> {
+    let mut stmt = conn.prepare_cached(
+        "SELECT pattern, role, weakness_mean, weakness_sd, priority, planned_dose, achieved_dose
+         FROM pattern_training_events WHERE session_id = ?1 ORDER BY rowid",
+    )?;
+    let rows = stmt.query_map([session_id], |row| {
+        Ok((
+            TargetColumns {
+                pattern: row.get(0)?,
+                role: row.get(1)?,
+                weakness_mean: row.get(2)?,
+                weakness_sd: row.get(3)?,
+                priority: row.get(4)?,
+                planned_dose: row.get(5)?,
+            },
+            row.get::<_, i64>(6)?,
+        ))
+    })?;
+    rows.map(|row| {
+        let (target, achieved) = row?;
+        Ok(TrainingEvent {
+            target: target.decode()?,
+            achieved_dose: dose(achieved, "achieved_dose")?,
+        })
+    })
+    .collect()
 }
 
 /// Writes one session's training events, stamped with the current model

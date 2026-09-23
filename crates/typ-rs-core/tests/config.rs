@@ -61,6 +61,17 @@ fn the_defaults_are_the_documented_starting_points() {
         ),
         (0.30, 0.80, 4)
     );
+    assert_eq!(config.pool_sample, 200);
+    assert_eq!(config.coverage_scale, 20.0);
+    assert_eq!(config.temperature, 0.25);
+    assert_eq!(
+        (config.recent_word_sessions, config.recent_word_penalty),
+        (5, 1.0)
+    );
+    assert_eq!((config.overload_targets, config.overload_penalty), (3, 1.0));
+    assert_eq!((config.long_word_length, config.length_penalty), (10, 0.2));
+    assert_eq!(config.min_exposure_gap, 2);
+    assert_eq!(config.contamination_sessions, 10);
 }
 
 #[test]
@@ -110,6 +121,17 @@ fn every_tunable_appears_by_name_in_the_json() {
         "ramp_start_share",
         "ramp_full_share",
         "ramp_sessions",
+        "pool_sample",
+        "coverage_scale",
+        "temperature",
+        "recent_word_sessions",
+        "recent_word_penalty",
+        "overload_targets",
+        "overload_penalty",
+        "long_word_length",
+        "length_penalty",
+        "min_exposure_gap",
+        "contamination_sessions",
     ] {
         assert!(
             json.contains(&format!("\"{key}\":")),
@@ -133,7 +155,7 @@ fn a_changed_tunable_reads_back_changed() {
 
 #[test]
 fn a_missing_tunable_takes_its_default_and_an_unknown_one_is_ignored() {
-    let read = SchedulerConfig::from_json(r#"{"kappa": 4, "temperature": 0.7}"#).unwrap();
+    let read = SchedulerConfig::from_json(r#"{"kappa": 4, "humidity": 0.7}"#).unwrap();
     assert_eq!(read.kappa, 4.0);
     assert_eq!(
         read.pattern_half_life_days,

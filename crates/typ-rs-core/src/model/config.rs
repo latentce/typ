@@ -80,6 +80,37 @@ pub struct SchedulerConfig {
     pub ramp_start_share: f64,
     pub ramp_full_share: f64,
     pub ramp_sessions: usize,
+    /// The candidate pool for targeted words is every word containing a
+    /// practised pattern plus this many words drawn from the reference
+    /// distribution.
+    pub pool_sample: usize,
+    /// What one fresh exposure of the highest-priority target adds to a
+    /// word's coverage gain before the gain's log is taken. The frequency
+    /// term of the word score spans a few nats over the corpus, so a value
+    /// of a few tens lets coverage lead while common words win among equals.
+    pub coverage_scale: f64,
+    /// The softmax temperature over word scores: lower picks the
+    /// best-scored word more surely, higher spreads the draw. The pool
+    /// runs to hundreds of words, so a temperature near one lets the many
+    /// mediocre words outweigh the few good ones between them.
+    pub temperature: f64,
+    /// The penalty on a word's score for having been shown as targeted in
+    /// any of the last this many sessions.
+    pub recent_word_sessions: usize,
+    pub recent_word_penalty: f64,
+    /// The penalty per exposed target above this many in one word.
+    pub overload_targets: usize,
+    pub overload_penalty: f64,
+    /// The penalty per character of a word above this length.
+    pub long_word_length: usize,
+    pub length_penalty: f64,
+    /// Two words exposing the same target are kept at least this many
+    /// positions apart in the prompt where possible; one or less imposes
+    /// nothing.
+    pub min_exposure_gap: usize,
+    /// A probe is contaminated by targeted practice in the last this many
+    /// sessions.
+    pub contamination_sessions: usize,
 }
 
 impl Default for SchedulerConfig {
@@ -117,6 +148,17 @@ impl Default for SchedulerConfig {
             ramp_start_share: 0.30,
             ramp_full_share: 0.80,
             ramp_sessions: 4,
+            pool_sample: 200,
+            coverage_scale: 20.0,
+            temperature: 0.25,
+            recent_word_sessions: 5,
+            recent_word_penalty: 1.0,
+            overload_targets: 3,
+            overload_penalty: 1.0,
+            long_word_length: 10,
+            length_penalty: 0.2,
+            min_exposure_gap: 2,
+            contamination_sessions: 10,
         }
     }
 }
@@ -322,6 +364,72 @@ const TUNABLES: &[Tunable] = &[
         name: "ramp_sessions",
         get: |c| c.ramp_sessions as f64,
         set: |c, v| c.ramp_sessions = v as usize,
+        whole_number: true,
+    },
+    Tunable {
+        name: "pool_sample",
+        get: |c| c.pool_sample as f64,
+        set: |c, v| c.pool_sample = v as usize,
+        whole_number: true,
+    },
+    Tunable {
+        name: "coverage_scale",
+        get: |c| c.coverage_scale,
+        set: |c, v| c.coverage_scale = v,
+        whole_number: false,
+    },
+    Tunable {
+        name: "temperature",
+        get: |c| c.temperature,
+        set: |c, v| c.temperature = v,
+        whole_number: false,
+    },
+    Tunable {
+        name: "recent_word_sessions",
+        get: |c| c.recent_word_sessions as f64,
+        set: |c, v| c.recent_word_sessions = v as usize,
+        whole_number: true,
+    },
+    Tunable {
+        name: "recent_word_penalty",
+        get: |c| c.recent_word_penalty,
+        set: |c, v| c.recent_word_penalty = v,
+        whole_number: false,
+    },
+    Tunable {
+        name: "overload_targets",
+        get: |c| c.overload_targets as f64,
+        set: |c, v| c.overload_targets = v as usize,
+        whole_number: true,
+    },
+    Tunable {
+        name: "overload_penalty",
+        get: |c| c.overload_penalty,
+        set: |c, v| c.overload_penalty = v,
+        whole_number: false,
+    },
+    Tunable {
+        name: "long_word_length",
+        get: |c| c.long_word_length as f64,
+        set: |c, v| c.long_word_length = v as usize,
+        whole_number: true,
+    },
+    Tunable {
+        name: "length_penalty",
+        get: |c| c.length_penalty,
+        set: |c, v| c.length_penalty = v,
+        whole_number: false,
+    },
+    Tunable {
+        name: "min_exposure_gap",
+        get: |c| c.min_exposure_gap as f64,
+        set: |c, v| c.min_exposure_gap = v as usize,
+        whole_number: true,
+    },
+    Tunable {
+        name: "contamination_sessions",
+        get: |c| c.contamination_sessions as f64,
+        set: |c, v| c.contamination_sessions = v as usize,
         whole_number: true,
     },
 ];

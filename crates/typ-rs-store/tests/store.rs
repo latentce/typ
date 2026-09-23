@@ -4,7 +4,7 @@ use std::str::FromStr;
 
 use rusqlite::Connection;
 use tempfile::TempDir;
-use typ_rs_core::compose::{self, ComposedPrompt, ComposedWord, WordRole};
+use typ_rs_core::compose::{self, ComposedPrompt, ComposedWord, Contamination, WordRole};
 use typ_rs_core::corpus::{CORPUS_VERSION, Corpus};
 use typ_rs_core::layout::Layout;
 use typ_rs_core::model::{MODEL_VERSION, ModelState, SchedulerConfig};
@@ -1099,7 +1099,13 @@ fn targeted(words: &str) -> ComposedPrompt {
     composed.words[0] = ComposedWord {
         role: WordRole::Targeted,
         exposed_targets: vec!["at".into()],
+        selection_score: Some(-1.5),
+        contamination: None,
     };
+    composed.words[1].contamination = Some(Contamination {
+        recently_targeted_word: true,
+        recently_targeted_patterns: vec!["og".into()],
+    });
     composed.targets = vec![
         target("at", TargetRole::Target),
         target("og", TargetRole::Deferred),
@@ -1128,11 +1134,19 @@ fn a_prompt_is_stored_with_its_word_roles_and_targets_and_read_back_with_the_ses
     assert_eq!(started.targets, composed.targets);
     assert_eq!(store.session(started.id).unwrap().targets, composed.targets);
 
-    let rows: Vec<(String, String, String)> = Connection::open(&path)
+    assert_eq!(started.targeted_words, vec![Box::from("cat")]);
+
+    type WordRow = (String, String, String, Option<f64>, Option<String>);
+    let rows: Vec<WordRow> = Connection::open(&path)
         .unwrap()
-        .prepare("SELECT word, role, exposed_targets FROM prompt_words ORDER BY word_index")
+        .prepare(
+            "SELECT word, role, exposed_targets, selection_score, contamination
+             FROM prompt_words ORDER BY word_index",
+        )
         .unwrap()
-        .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+        .query_map([], |r| {
+            Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?))
+        })
         .unwrap()
         .collect::<Result<_, _>>()
         .unwrap();
@@ -1142,10 +1156,21 @@ fn a_prompt_is_stored_with_its_word_roles_and_targets_and_read_back_with_the_ses
             (
                 "cat".to_string(),
                 "targeted".to_string(),
-                r#"["at"]"#.to_string()
+                r#"["at"]"#.to_string(),
+                Some(-1.5),
+                None,
             ),
-            ("dog".to_string(), "probe".to_string(), "[]".to_string()),
-            ("the".to_string(), "probe".to_string(), "[]".to_string()),
+            (
+                "dog".to_string(),
+                "probe".to_string(),
+                "[]".to_string(),
+                None,
+                Some(
+                    r#"{"before":"targeted","after":"probe","recent_word":true,"recent_patterns":["og"]}"#
+                        .to_string()
+                ),
+            ),
+            ("the".to_string(), "probe".to_string(), "[]".to_string(), None, None),
         ]
     );
     let targets: Vec<(String, String, i64)> = Connection::open(&path)
@@ -1182,8 +1207,19 @@ fn a_waiting_prompt_composed_ahead_keeps_its_targets_for_the_session_that_shows_
     )
     .unwrap();
 
-    let (_, shown) = start(&mut store, &profile, 2_000, "unused unused unused");
-    assert_eq!(shown, self::prompt("cat dog the"));
+    let shown = store
+        .start_session(
+            &profile,
+            SessionStart {
+                started_at: 2_000,
+                seed: 1,
+                word_count: 3,
+            },
+            || panic!("a prompt is waiting"),
+        )
+        .unwrap();
+    assert_eq!(shown.prompt, self::prompt("cat dog the"));
+    assert_eq!(shown.targeted_words, vec![Box::from("cat")]);
     let sessions = store.completed_sessions(&profile, 10).unwrap();
     assert!(
         sessions[0].targets.is_empty(),
@@ -1292,10 +1328,16 @@ fn the_training_history_replays_the_sessions_and_optionally_the_waiting_prompt()
     let at = history.pattern("at").unwrap();
     assert_eq!((at.sessions_practised, at.achieved_dose), (1, 2));
     assert_eq!(at.first_weakness_mean, Some(0.5));
+    // The second session's prompt showed "cat" as targeted; the waiting
+    // prompt's probes-only words add nothing.
+    assert!(history.targeted_word_within("cat", 1));
+    assert!(!history.targeted_word_within("that", 2));
+    assert!(showing.targeted_word_within("cat", 2));
+    assert!(!showing.targeted_word_within("cat", 1));
 
     // A whole history built the same way in memory agrees.
     let mut expected = TrainingHistory::new();
-    expected.record(&[], store.config());
+    expected.record(&[], [], store.config());
     expected.record(
         &[
             TrainingEvent {
@@ -1311,6 +1353,7 @@ fn the_training_history_replays_the_sessions_and_optionally_the_waiting_prompt()
                 achieved_dose: 1,
             },
         ],
+        ["cat"],
         store.config(),
     );
     assert_eq!(history, expected);
@@ -1339,7 +1382,7 @@ fn a_targeted_history_rebuilds_to_identical_caches() {
             model.apply_session(&state, started_at, corpus, store.config());
             let mut history = store.training_history(&profile).unwrap();
             let events = scheduler::achieved_doses(&state, &store.session(id).unwrap().targets);
-            history.record(&events, store.config());
+            history.record(&events, [], store.config());
             let next = compose::next_prompt(
                 &model,
                 corpus,

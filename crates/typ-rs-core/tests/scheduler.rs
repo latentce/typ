@@ -1,4 +1,4 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use typ_rs_core::corpus::Corpus;
 use typ_rs_core::model::{ModelState, SchedulerConfig};
@@ -6,7 +6,7 @@ use typ_rs_core::prompt::Prompt;
 use typ_rs_core::random::Rng;
 use typ_rs_core::scheduler::{
     self, SelectedTarget, TargetRole, TrainingEvent, TrainingHistory, achieved_doses,
-    eligible_patterns, same_chain, select_targets,
+    eligible_patterns, same_chain, select_targets, word_exposures,
 };
 use typ_rs_core::session::{EndCondition, Input, Key, SessionState};
 
@@ -304,7 +304,7 @@ fn a_deferred_pattern_stays_out_of_candidacy_and_is_logged_for_the_whole_window(
     let deferred: Vec<&str> = with_role(&first, TargetRole::Deferred);
     assert!(!deferred.is_empty(), "seed 3 defers nothing; pick another");
     let pattern = deferred[0].to_string();
-    history.record(&achieved_doses(&typed("cat", "cat"), &first), &config);
+    history.record(&achieved_doses(&typed("cat", "cat"), &first), [], &config);
     assert_eq!(history.pattern(&pattern).unwrap().deferral_remaining, 2);
 
     // Two more sessions: logged as deferred each time, never a target or
@@ -317,7 +317,7 @@ fn a_deferred_pattern_stays_out_of_candidacy_and_is_logged_for_the_whole_window(
             .map(|t| t.role)
             .collect();
         assert_eq!(roles, vec![TargetRole::Deferred], "{pattern:?}: {roles:?}");
-        history.record(&achieved_doses(&typed("cat", "cat"), &next), &config);
+        history.record(&achieved_doses(&typed("cat", "cat"), &next), [], &config);
         assert_eq!(
             history.pattern(&pattern).unwrap().deferral_remaining,
             remaining
@@ -378,6 +378,7 @@ fn one_exploration_target_is_drawn_from_neither_selected_nor_deferred_patterns()
             event(" th", TargetRole::Deferred, 0),
             event("he", TargetRole::Deferred, 0),
         ],
+        [],
         &config(),
     );
     for seed in 0..20 {
@@ -404,28 +405,28 @@ fn a_target_plateaus_after_enough_practice_without_change_and_recovers_when_unta
     let mut history = TrainingHistory::new();
     // Three sessions with six exposures each: not yet enough sessions.
     for _ in 0..3 {
-        history.record(&[event("th", TargetRole::Target, 6)], &config);
+        history.record(&[event("th", TargetRole::Target, 6)], [], &config);
     }
     assert_eq!(history.plateau_factor("th", 0.5, 0.1, &config), 1.0);
     // A fourth: 4 sessions, 24 > 20 exposures, weakness unchanged within sd.
-    history.record(&[event("th", TargetRole::Target, 6)], &config);
+    history.record(&[event("th", TargetRole::Target, 6)], [], &config);
     assert_eq!(history.plateau_factor("th", 0.5, 0.1, &config), 0.5);
     // A change larger than the uncertainty is not a plateau.
     assert_eq!(history.plateau_factor("th", 0.2, 0.1, &config), 1.0);
     // Nor is enough sessions without enough dose.
     let mut light = TrainingHistory::new();
     for _ in 0..4 {
-        light.record(&[event("th", TargetRole::Target, 5)], &config);
+        light.record(&[event("th", TargetRole::Target, 5)], [], &config);
     }
     assert_eq!(light.plateau_factor("th", 0.5, 0.1, &config), 1.0);
 
     // Untargeted sessions recover the factor linearly toward one.
     for _ in 0..5 {
-        history.record(&[], &config);
+        history.record(&[], [], &config);
     }
     assert_eq!(history.plateau_factor("th", 0.5, 0.1, &config), 0.75);
     for _ in 0..5 {
-        history.record(&[], &config);
+        history.record(&[], [], &config);
     }
     assert_eq!(history.plateau_factor("th", 0.5, 0.1, &config), 1.0);
 }
@@ -434,14 +435,14 @@ fn a_target_plateaus_after_enough_practice_without_change_and_recovers_when_unta
 fn a_deferral_window_runs_down_with_every_session_even_one_that_selected_nothing() {
     let config = config();
     let mut history = TrainingHistory::new();
-    history.record(&[event("th", TargetRole::Deferred, 0)], &config);
+    history.record(&[event("th", TargetRole::Deferred, 0)], [], &config);
     assert_eq!(history.pattern("th").unwrap().deferral_remaining, 2);
-    history.record(&[], &config);
+    history.record(&[], [], &config);
     assert_eq!(history.pattern("th").unwrap().deferral_remaining, 1);
-    history.record(&[], &config);
+    history.record(&[], [], &config);
     assert!(!history.is_deferred("th"));
     // Freed, it can be deferred afresh for a full window.
-    history.record(&[event("th", TargetRole::Deferred, 0)], &config);
+    history.record(&[event("th", TargetRole::Deferred, 0)], [], &config);
     assert_eq!(history.pattern("th").unwrap().deferral_remaining, 2);
 }
 
@@ -449,13 +450,41 @@ fn a_deferral_window_runs_down_with_every_session_even_one_that_selected_nothing
 fn an_exploration_session_counts_as_practice_and_a_deferral_does_not() {
     let config = config();
     let mut history = TrainingHistory::new();
-    history.record(&[event("th", TargetRole::Explore, 4)], &config);
-    history.record(&[event("th", TargetRole::Deferred, 3)], &config);
+    history.record(&[event("th", TargetRole::Explore, 4)], [], &config);
+    history.record(&[event("th", TargetRole::Deferred, 3)], [], &config);
     let h = history.pattern("th").unwrap();
     assert_eq!((h.sessions_practised, h.achieved_dose), (1, 4));
     assert_eq!(h.first_weakness_mean, Some(0.5));
     assert_eq!(h.last_practised, Some(1));
     assert_eq!(history.sessions(), 2);
+}
+
+#[test]
+fn the_history_answers_whether_a_pattern_or_word_was_practised_within_recent_sessions() {
+    let config = config();
+    let mut history = TrainingHistory::new();
+    assert!(!history.practised_within("th", 10));
+    assert!(!history.targeted_word_within("the", 10));
+
+    history.record(
+        &[event("th", TargetRole::Target, 6)],
+        ["the", "that"],
+        &config,
+    );
+    history.record(&[event("he", TargetRole::Deferred, 0)], [], &config);
+    history.record(&[event("an", TargetRole::Explore, 6)], ["and"], &config);
+    // Three sessions recorded: `th` and "the" are from the first, so they
+    // are within the last three sessions but not the last two; a deferral
+    // is not practice.
+    assert!(history.practised_within("th", 3));
+    assert!(!history.practised_within("th", 2));
+    assert!(history.practised_within("an", 1));
+    assert!(!history.practised_within("he", 3));
+    assert!(history.targeted_word_within("the", 3));
+    assert!(history.targeted_word_within("that", 3));
+    assert!(!history.targeted_word_within("the", 2));
+    assert!(history.targeted_word_within("and", 1));
+    assert!(!history.targeted_word_within("dog", 3));
 }
 
 // --- Achieved dose ----------------------------------------------------------------
@@ -518,4 +547,46 @@ fn every_selected_pattern_gets_an_event_even_with_no_exposure() {
     assert_eq!(events.len(), 2);
     assert!(events.iter().all(|e| e.achieved_dose == 0));
     assert_eq!(events[0].target, targets[0]);
+}
+
+// --- Word exposures ---------------------------------------------------------------
+
+#[test]
+fn a_words_slot_exposes_only_the_deepest_practised_pattern_in_its_chain() {
+    let targets = [
+        target("at", TargetRole::Target, 0.5),
+        target("hat", TargetRole::Explore, 0.5),
+    ];
+    // The `t` of "that" is a `hat` slot, so `at` gets nothing from it; in
+    // "cat" the same slot's chain is `cat`, so `at` is the deepest.
+    assert_eq!(
+        word_exposures("that", &targets),
+        BTreeMap::from([("hat", 1)])
+    );
+    assert_eq!(word_exposures("cat", &targets), BTreeMap::from([("at", 1)]));
+}
+
+#[test]
+fn at_most_two_slots_of_a_word_count_toward_one_pattern() {
+    let targets = [target("at", TargetRole::Target, 0.5)];
+    assert_eq!(
+        word_exposures("atatat", &targets),
+        BTreeMap::from([("at", 2)])
+    );
+}
+
+#[test]
+fn a_word_standing_alone_is_read_with_a_space_either_side() {
+    let targets = [
+        target(" t", TargetRole::Target, 0.5),
+        target("t ", TargetRole::Target, 0.5),
+        target("og", TargetRole::Deferred, 0.0),
+    ];
+    // Word-initial and word-final patterns are exposed; a deferred
+    // candidate is not practised and so exposes nothing here.
+    assert_eq!(
+        word_exposures("tot", &targets),
+        BTreeMap::from([(" t", 1), ("t ", 1)])
+    );
+    assert!(word_exposures("dog", &targets).is_empty());
 }

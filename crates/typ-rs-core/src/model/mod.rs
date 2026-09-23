@@ -41,7 +41,7 @@ use context::{Aggregate, Coefficients, Features, slot_features};
 /// Identifies the analysis and scheduling algorithm. Bump whenever anything
 /// that feeds a cache changes; every cache is stamped with it and rebuilt
 /// from the stored sessions when it differs.
-pub const MODEL_VERSION: u32 = 3;
+pub const MODEL_VERSION: u32 = 4;
 
 /// The pattern text of the root of the chain: the user as a whole.
 pub const ROOT: &str = "";

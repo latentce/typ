@@ -166,7 +166,11 @@ fn session(words: Option<&str>, profile: Option<&str>) -> Result<(), Box<dyn Err
         Ok((mut model, mut history)) => {
             let update = model.apply_session(&run.state, started_at, corpus, &config);
             let events = scheduler::achieved_doses(&run.state, &started.targets);
-            history.record(&events, &config);
+            history.record(
+                &events,
+                started.targeted_words.iter().map(AsRef::as_ref),
+                &config,
+            );
             let next = compose::next_prompt(
                 &model,
                 corpus,

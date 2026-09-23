@@ -122,11 +122,14 @@ pub struct PatternHistory {
 }
 
 /// The training events of a profile's sessions in order: the deferral
-/// windows currently open and each pattern's record of practice.
+/// windows currently open, each pattern's record of practice, and the
+/// words each session showed as targeted.
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct TrainingHistory {
     sessions: usize,
     patterns: BTreeMap<Box<str>, PatternHistory>,
+    /// One entry per session: the words shown as targeted in it.
+    targeted_words: Vec<BTreeSet<Box<str>>>,
 }
 
 impl TrainingHistory {
@@ -160,18 +163,40 @@ impl TrainingHistory {
             .is_some_and(|h| h.deferral_remaining > 0)
     }
 
-    /// Records one session's events, the next in order. A deferred event
-    /// for a pattern not inside a window opens one of `deferral_window`
-    /// sessions, this one included. Every open window then runs down by
-    /// this session, whether or not the pattern was logged in it, so a
-    /// session that selected nothing still counts.
+    /// Whether the pattern was a target or exploration target in any of the
+    /// last `sessions` sessions recorded.
+    pub fn practised_within(&self, pattern: &str, sessions: usize) -> bool {
+        self.pattern(pattern)
+            .and_then(|h| h.last_practised)
+            .is_some_and(|last| last + sessions > self.sessions)
+    }
+
+    /// Whether the word was shown as targeted in any of the last `sessions`
+    /// sessions recorded.
+    pub fn targeted_word_within(&self, word: &str, sessions: usize) -> bool {
+        self.targeted_words
+            .iter()
+            .rev()
+            .take(sessions)
+            .any(|words| words.contains(word))
+    }
+
+    /// Records one session's events and the words its prompt showed as
+    /// targeted, the next session in order. A deferred event for a pattern
+    /// not inside a window opens one of `deferral_window` sessions, this
+    /// one included. Every open window then runs down by this session,
+    /// whether or not the pattern was logged in it, so a session that
+    /// selected nothing still counts.
     pub fn record<'a>(
         &mut self,
         events: impl IntoIterator<Item = &'a TrainingEvent>,
+        targeted_words: impl IntoIterator<Item = &'a str>,
         config: &SchedulerConfig,
     ) {
         self.sessions += 1;
         let session = self.sessions;
+        self.targeted_words
+            .push(targeted_words.into_iter().map(Box::from).collect());
         for event in events {
             let t = &event.target;
             let h = self.patterns.entry(t.pattern.clone()).or_default();
@@ -371,28 +396,12 @@ pub fn achieved_doses(state: &SessionState, targets: &[SelectedTarget]) -> Vec<T
     for word in 0..state.words_completed() {
         let len = prompt.word(word).chars().count();
         let has_space_slot = word + 1 < state.word_count() || ended_on_space;
-        let mut in_word: BTreeMap<&str, usize> = BTreeMap::new();
-        let mut expose = |level: &str| {
-            let level = practised
-                .get(level)
-                .or_else(|| deferred.get(level))
-                .copied()
-                .expect("only selected patterns are exposed");
-            let count = in_word.entry(level).or_default();
-            if *count < MAX_EXPOSURES_PER_WORD {
-                *count += 1;
-                *exposures.entry(level).or_default() += 1;
-            }
-        };
-        for position in 0..len + usize::from(has_space_slot) {
-            let chain = prompt.pattern_ending_at(Slot { word, position });
-            let levels = chain.char_indices().map(|(i, _)| &chain[i..]);
-            if let Some(level) = levels.clone().find(|l| practised.contains(l)) {
-                expose(level);
-            }
-            for level in levels.filter(|l| deferred.contains(l)) {
-                expose(level);
-            }
+        let chains: Vec<String> = (0..len + usize::from(has_space_slot))
+            .map(|position| prompt.pattern_ending_at(Slot { word, position }))
+            .collect();
+        let chains = chains.iter().map(String::as_str);
+        for (pattern, count) in exposures_in_word(chains, &practised, &deferred) {
+            *exposures.entry(pattern).or_default() += count;
         }
     }
     targets
@@ -402,6 +411,81 @@ pub fn achieved_doses(state: &SessionState, targets: &[SelectedTarget]) -> Vec<T
             achieved_dose: exposures.get(t.pattern.as_ref()).copied().unwrap_or(0),
         })
         .collect()
+}
+
+/// How many exposures of each practised pattern (target or exploration
+/// target) one word gives on its own, read as space-padded text with its
+/// following space as a slot; what a word is worth when it is chosen for a
+/// prompt. The same rules as [`achieved_doses`]: a slot exposes only the
+/// deepest practised pattern in its chain and at most two slots count
+/// toward one pattern. Patterns with no exposure are absent.
+pub fn word_exposures<'t>(word: &str, targets: &'t [SelectedTarget]) -> BTreeMap<&'t str, usize> {
+    let practised: BTreeSet<&str> = targets
+        .iter()
+        .filter(|t| t.role.is_practised())
+        .map(|t| t.pattern.as_ref())
+        .collect();
+    exposures_in_word(WordChains::new(word).iter(), &practised, &BTreeSet::new())
+}
+
+/// The chain ending at each slot of a word standing alone: the word read as
+/// space-padded text, so its first character follows a space and its last
+/// is followed by one, with the following space itself a slot. As in a
+/// prompt's first word, the first character has only the one space before
+/// it.
+pub(crate) struct WordChains {
+    padded: String,
+    /// The byte range of each slot's chain within `padded`.
+    ranges: Vec<(usize, usize)>,
+}
+
+impl WordChains {
+    pub(crate) fn new(word: &str) -> WordChains {
+        let padded = format!(" {word} ");
+        let starts: Vec<usize> = padded.char_indices().map(|(i, _)| i).collect();
+        let ranges = (1..starts.len())
+            .map(|slot| {
+                let from = starts[slot.saturating_sub(2)];
+                let to = starts.get(slot + 1).copied().unwrap_or(padded.len());
+                (from, to)
+            })
+            .collect();
+        WordChains { padded, ranges }
+    }
+
+    pub(crate) fn iter(&self) -> impl Iterator<Item = &str> {
+        self.ranges.iter().map(|&(from, to)| &self.padded[from..to])
+    }
+}
+
+/// Counts one word's exposures from the chains ending at each of its slots.
+pub(crate) fn exposures_in_word<'p, 'c>(
+    chains: impl Iterator<Item = &'c str>,
+    practised: &BTreeSet<&'p str>,
+    deferred: &BTreeSet<&'p str>,
+) -> BTreeMap<&'p str, usize> {
+    let mut in_word: BTreeMap<&'p str, usize> = BTreeMap::new();
+    let mut expose = |level: &str| {
+        let level = practised
+            .get(level)
+            .or_else(|| deferred.get(level))
+            .copied()
+            .expect("only selected patterns are exposed");
+        let count = in_word.entry(level).or_default();
+        if *count < MAX_EXPOSURES_PER_WORD {
+            *count += 1;
+        }
+    };
+    for chain in chains {
+        let levels = chain.char_indices().map(|(i, _)| &chain[i..]);
+        if let Some(level) = levels.clone().find(|l| practised.contains(l)) {
+            expose(level);
+        }
+        for level in levels.filter(|l| deferred.contains(l)) {
+            expose(level);
+        }
+    }
+    in_word
 }
 
 /// At most this many slots within one word count toward a pattern's dose.

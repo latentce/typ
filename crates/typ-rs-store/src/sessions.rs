@@ -14,7 +14,7 @@ use typ_rs_core::session::{
     EndCondition, EventFlags, EventKind, InputEvent, Outcome, SEMANTICS_VERSION, SessionState,
 };
 
-use crate::prompts::{self, Context};
+use crate::prompts::{self, Context, LoadedPrompt};
 use crate::{Error, Profile, Result, Store, model, training};
 
 /// A session's row id, the handle a user names a stored session by.
@@ -62,6 +62,9 @@ pub struct StartedSession {
     pub prompt: Prompt,
     /// Every pattern selected for the prompt, targets first.
     pub targets: Vec<SelectedTarget>,
+    /// The prompt's words shown as targeted, in prompt order; what the
+    /// training history records for the session.
+    pub targeted_words: Vec<Box<str>>,
 }
 
 /// A session read back from the database.
@@ -121,12 +124,17 @@ impl Store {
             .conn
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
         let wanted = Context::current(start.word_count, &profile.layout);
-        let (prompt_id, prompt, targets) = match prompts::take_next(&tx, profile.id, &wanted)? {
+        let loaded = match prompts::take_next(&tx, profile.id, &wanted)? {
             Some(waiting) => waiting,
             None => {
                 let composed = compose();
                 let id = prompts::insert(&tx, profile.id, &composed, start.started_at)?;
-                (id, composed.prompt, composed.targets)
+                LoadedPrompt {
+                    id,
+                    targeted_words: composed.targeted_words().map(Box::from).collect(),
+                    prompt: composed.prompt,
+                    targets: composed.targets,
+                }
             }
         };
         tx.execute(
@@ -136,7 +144,7 @@ impl Store {
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
             params![
                 profile.id,
-                prompt_id,
+                loaded.id,
                 start.started_at,
                 Outcome::Interrupted.name(),
                 profile.mode,
@@ -150,8 +158,9 @@ impl Store {
         tx.commit()?;
         Ok(StartedSession {
             id,
-            prompt,
-            targets,
+            prompt: loaded.prompt,
+            targets: loaded.targets,
+            targeted_words: loaded.targeted_words,
         })
     }
 
