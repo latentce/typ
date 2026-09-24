@@ -21,6 +21,8 @@ comfy-table = { workspace = true }
 crossterm = { workspace = true }
 dirs = { workspace = true }
 getrandom = { workspace = true }
+rgb = { workspace = true }
+textplots = { workspace = true }
 
 [dev-dependencies]
 rusqlite = { workspace = true }

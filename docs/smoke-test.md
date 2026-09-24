@@ -92,22 +92,31 @@ own history. To start from nothing, `rm -r target/typ-data` first.
     first, as wide as the terminal, and the `focus` block tags the five
     weakest patterns and names what the next session practices; neither
     command disturbs the other. `just run inspect` shows the same sessions
-    in plain text, the slowest, most error-prone, and weakest patterns so
-    far (the last as `mean ± sd`) and, once the scheduler has held some
-    candidates back, `deferred candidates` with the sessions remaining.
-    Finish or interrupt the session: the next `just run` shows a different
-    prompt.
-16. **Replay.** `just run replay N` with an id from the table. The first
+    in plain text under a header row that lines up with them, the slowest,
+    most error-prone, and weakest patterns so far (the last as `mean ± sd`)
+    and, once the scheduler has held some candidates back, `deferred
+    candidates` with the sessions remaining. Finish or interrupt the
+    session: the next `just run` shows a different prompt.
+16. **Charts.** With two or more sessions completed, `just run stats` shows
+    the headline with a change, then two charts between it and the table:
+    `speed on standard text · N sessions` and `accuracy · N sessions`, each
+    eight rows of braille as wide as the terminal, with the sessions as
+    single dots and a green line drawn through them, whole-number labels at
+    the top and bottom right (`100` topping the accuracy chart), and the
+    dates of the first and last session at the two ends beneath. Widen or
+    narrow the terminal: the charts follow. `NO_COLOR=1 just run stats`
+    shows the same charts with the line uncolored, and the arrows plain.
+17. **Replay.** `just run replay N` with an id from the table. The first
     lines repeat the results the session printed; below them every word
     shows its first attempt, its own raw accuracy, and the errors attributed
     to patterns, and every
     keystroke its interval class. The corrections you typed in step 2 show
     as `excluded: backspace` / `replacement`, the resize as `after_resize`,
     the paste as `in_paste`, and any long pause as a hesitation.
-17. **Rebuild.** `just run stats > /tmp/before`, then `just run rebuild`
+18. **Rebuild.** `just run stats > /tmp/before`, then `just run rebuild`
     (it reports how many sessions it reapplied) and `just run stats` again:
     the output is identical to `/tmp/before`.
-18. **Settings.** `just run --words 12`: the prompt has 12 words; interrupt
+19. **Settings.** `just run --words 12`: the prompt has 12 words; interrupt
     it. `just run config words 15`, then `just run`: the prompt has 15
     words even though one was composed ahead at 50; interrupt it. `just run
     config words 5` refuses on one line and `just run config words` still

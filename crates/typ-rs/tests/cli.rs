@@ -160,6 +160,40 @@ fn target(pattern: &str, role: TargetRole) -> SelectedTarget {
     }
 }
 
+/// How many rows of braille a trend chart's body has.
+const CHART_ROWS: usize = 8;
+
+/// A trend chart as `stats` prints it to a pipe: `title`, eight rows of
+/// braille cells, and a footer running from `first_date` to the last
+/// session's date across 80 columns.
+fn assert_chart(chart: &str, title: &str, first_date: &str) {
+    let rows: Vec<&str> = chart.lines().collect();
+    assert_eq!(rows[0], title, "{chart}");
+    assert_eq!(rows.len(), 1 + CHART_ROWS + 1, "{chart}");
+    assert!(
+        rows[1..=CHART_ROWS]
+            .iter()
+            .flat_map(|row| row.chars())
+            .any(|c| ('\u{2801}'..='\u{28ff}').contains(&c)),
+        "{chart}"
+    );
+    let footer = rows[CHART_ROWS + 1];
+    assert!(footer.starts_with(first_date), "{footer:?}");
+    assert!(footer.ends_with("2024-01-17"), "{footer:?}");
+    assert_eq!(footer.chars().count(), 80, "{footer:?}");
+}
+
+/// The whole-number y labels at the right of a chart's first and last rows.
+fn chart_labels(chart: &str) -> [u32; 2] {
+    let rows: Vec<&str> = chart.lines().collect();
+    let label = |row: &str| {
+        row.rsplit_once(' ')
+            .and_then(|(_, l)| l.parse().ok())
+            .unwrap_or_else(|| panic!("{row:?}"))
+    };
+    [label(rows[1]), label(rows[CHART_ROWS])]
+}
+
 #[test]
 fn version_shows_the_license_and_the_corpus_attribution_under_both_flags() {
     for flag in ["--version", "-V"] {
@@ -492,10 +526,12 @@ fn stats_with_one_session_shows_the_headline_without_changes_and_asks_for_one_mo
     );
     assert_eq!(lines.len(), 2 + 2 + 5 * 2 + 1, "{focus}");
     assert_eq!(blocks.next(), None);
+    // No chart title: none ends in ` sessions`.
+    assert!(!run.stdout.contains(" sessions\n"), "{}", run.stdout);
 }
 
 #[test]
-fn stats_with_rising_speed_shows_the_change_and_tables_the_sessions_most_recent_first() {
+fn stats_with_rising_speed_shows_the_change_charts_the_trends_and_tables_the_sessions() {
     let dir = tempfile::tempdir().unwrap();
     {
         let mut store = Store::open(&dir.path().join("typ.db")).unwrap();
@@ -531,6 +567,24 @@ fn stats_with_rising_speed_shows_the_change_and_tables_the_sessions_most_recent_
     // nothing to compare it with yet.
     assert_eq!(headline[1], "94.4% accuracy");
     assert_eq!(headline[2], "not enough probes yet to call a trend");
+
+    // The speed chart counts the two sessions with a speed on standard
+    // text; the accuracy chart every one. Each is a title, eight rows of
+    // braille labeled top and bottom, and the first and last dates across
+    // the 80 columns a pipe gets. Stdout is not a terminal, so no color.
+    let speed = blocks.next().unwrap();
+    let accuracy = blocks.next().unwrap();
+    assert_chart(speed, "speed on standard text · 2 sessions", "2024-01-16");
+    assert_chart(accuracy, "accuracy · 3 sessions", "2024-01-15");
+    let speed_labels = chart_labels(speed);
+    assert!(speed_labels.iter().all(|l| l % 10 == 0), "{speed}");
+    assert!(speed_labels[0] > speed_labels[1], "{speed}");
+    assert!(speed_labels[0] - speed_labels[1] >= 20, "{speed}");
+    let accuracy_labels = chart_labels(accuracy);
+    assert_eq!(accuracy_labels[0], 100, "{accuracy}");
+    assert!(accuracy_labels[1] % 5 == 0, "{accuracy}");
+    assert!(accuracy_labels[1] <= 80, "{accuracy}");
+    assert!(!run.stdout.contains('\x1b'), "{}", run.stdout);
 
     let table: Vec<&str> = blocks.next().unwrap().lines().collect();
     assert_eq!(

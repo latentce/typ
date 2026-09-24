@@ -21,7 +21,7 @@ flowchart BT
 | --- | --- | --- |
 | `typ-rs-core` | `rand_chacha`, `unicode-width` | Pure logic. No terminal, no database, no clock: every function takes the time as an argument. Everything is deterministic given a seed. |
 | `typ-rs-store` | `rusqlite`, core | The only crate that knows about SQLite. Owns the schema and the rebuild. |
-| `typ-rs` | `crossterm`, `clap`, core, store | Raw-mode terminal loop, argument parsing, and the text of every report. Published as `typ-rs`, installs as `typ`. |
+| `typ-rs` | `crossterm`, `clap`, `comfy-table`, `textplots`, `rgb`, core, store | Raw-mode terminal loop, argument parsing, and the text of every report, including the progress view's tables and braille charts. Published as `typ-rs`, installs as `typ`. |
 | `typ-sim` | core | Never published. Drives the same pipeline the binary does with fake typists whose true weaknesses are known. See [`simulator.md`](simulator.md). |
 
 The split lets the analysis and scheduling be tested without a terminal or a

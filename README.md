@@ -105,11 +105,26 @@ Speed is the recent trend of your speed on standard text, not the raw WPM of
 the last prompt, so a hard practice prompt never makes you look slower than
 you are.
 
-Below that: a table of your last ten sessions (id, when, words, wpm, speed
-on standard text, accuracy, and accuracy after corrections), then a **focus**
+Below that, once you have two sessions, two charts: your speed on standard
+text, then your accuracy, over your recent sessions, oldest on the left.
+Each session is a point and the trend is the line drawn through them, so a
+single noisy session stands apart from where you are heading: the speed line
+is your recent series, the accuracy line the mean of your last five sessions.
+The speed chart plots speed on standard text rather than the WPM of each
+prompt, for the same reason as the headline: practice prompts differ in
+difficulty from session to session, so the prompt's own WPM would draw a hard
+prompt as a slow day. (A session whose speed on standard text is not yet
+known is left out of that chart rather than drawn at zero.) Both charts use
+the width of your terminal (more sessions fit in a wider one), are titled
+with how many sessions they cover, and footed with the dates of the first
+and last. The trend line is green where color is available and the charts
+read the same without it.
+
+Then a table of your last ten sessions (id, when, words, wpm, speed on
+standard text, accuracy, and accuracy after corrections), and a **focus**
 block naming the five patterns the trainer is working on, each tagged
 `slow`, `error-prone`, or `both`, and the patterns your next session will
-practice. Charts of the two trends appear once you have two sessions.
+practice.
 
 The session ids are what `typ replay` takes.
 
