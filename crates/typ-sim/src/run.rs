@@ -50,7 +50,7 @@ pub struct SessionRecord {
     pub weakness_at_composition: BTreeMap<Box<str>, f64>,
     /// How long the end-of-session steps took: applying the session,
     /// counting doses, recording the history, composing the next prompt,
-    /// and summarising.
+    /// and summarizing.
     pub pipeline_micros: u64,
     /// The learner's true reference loss once the session was typed.
     pub loss: Loss,
@@ -58,8 +58,8 @@ pub struct SessionRecord {
 
 impl SessionRecord {
     /// The targets and exploration target of the session.
-    pub fn practised(&self) -> impl Iterator<Item = &TrainingEvent> {
-        self.events.iter().filter(|e| e.target.role.is_practised())
+    pub fn practiced(&self) -> impl Iterator<Item = &TrainingEvent> {
+        self.events.iter().filter(|e| e.target.role.is_practiced())
     }
 }
 
@@ -70,7 +70,7 @@ pub struct Run {
     /// The learner's reference loss before any session.
     pub initial_loss: Loss,
     pub sessions: Vec<SessionRecord>,
-    /// Every practised pattern whose priority was at some point scaled down
+    /// Every practiced pattern whose priority was at some point scaled down
     /// for a plateau, with the ordinal of the session after which that was
     /// first so.
     pub plateaus: BTreeMap<Box<str>, usize>,
@@ -216,7 +216,7 @@ pub fn simulate(options: Options) -> Run {
     }
 }
 
-/// The recently practised patterns whose priority the history is scaling
+/// The recently practiced patterns whose priority the history is scaling
 /// down for a plateau as of `at`.
 fn plateaued(
     model: &ModelState,
@@ -225,7 +225,7 @@ fn plateaued(
     config: &SchedulerConfig,
 ) -> Vec<Box<str>> {
     history
-        .recently_practised(config.plateau_recovery_sessions.max(1))
+        .recently_practiced(config.plateau_recovery_sessions.max(1))
         .filter(|p| {
             let w = model.weakness(p, at, config);
             history.plateau_factor(p, w.mean, w.sd, config) < 1.0

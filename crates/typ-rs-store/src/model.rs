@@ -153,7 +153,7 @@ impl Store {
 /// Applies every ended session without a marker, oldest first, to its
 /// profile's model, writes its training events and its summary, writes the
 /// models back, and sets the markers. Each profile's recent series starts
-/// from its latest summarised session before the first pending one and is
+/// from its latest summarized session before the first pending one and is
 /// carried forward from there.
 fn apply_unmarked(conn: &Connection, config: &SchedulerConfig) -> Result<usize> {
     let pending = load_sessions(
@@ -200,7 +200,7 @@ fn apply_unmarked(conn: &Connection, config: &SchedulerConfig) -> Result<usize> 
 }
 
 /// Applies one stored session, replayed as `state`, to the model and
-/// summarises it, exactly as the session's own end did.
+/// summarizes it, exactly as the session's own end did.
 fn apply_one(
     model: &mut ModelState,
     session: &StoredSession,

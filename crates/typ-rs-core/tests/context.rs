@@ -150,7 +150,7 @@ fn the_last_letter_is_last_and_the_space_after_it_is_boundary_but_neither_first_
 }
 
 #[test]
-fn same_finger_and_same_hand_transitions_are_recognised() {
+fn same_finger_and_same_hand_transitions_are_recognized() {
     let corpus = corpus(&[("red", 1), ("as", 1)]);
     // `e` to `d`: both left middle finger, one row apart.
     let d = slot_features(
@@ -166,7 +166,7 @@ fn same_finger_and_same_hand_transitions_are_recognised() {
     assert_eq!(get(&d, Feature::SameHand), 1.0);
     assert_eq!(get(&d, Feature::RowChange), 1.0);
     assert!(close(get(&d, Feature::KeyDistance), 1.0625f64.sqrt()));
-    // `a` to `s`: same hand, neighbouring fingers on the home row.
+    // `a` to `s`: same hand, neighboring fingers on the home row.
     let s = slot_features(
         &Prompt::new(["as"]),
         Slot {

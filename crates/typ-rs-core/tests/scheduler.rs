@@ -439,18 +439,18 @@ fn a_target_plateaus_after_enough_practice_without_change_and_recovers_when_unta
 fn a_plateau_is_judged_against_the_weakness_when_the_practice_window_began() {
     let config = config();
     let mut history = TrainingHistory::new();
-    let practised_at = |history: &mut TrainingHistory, mean: f64| {
+    let practiced_at = |history: &mut TrainingHistory, mean: f64| {
         let mut e = event("th", TargetRole::Target, 6);
         e.target.weakness_mean = mean;
         history.record(&[e], [], &config);
     };
     // Shrunk first estimates, then settled ones.
     for mean in [0.3, 0.6, 0.9, 1.0, 1.0] {
-        practised_at(&mut history, mean);
+        practiced_at(&mut history, mean);
     }
-    // The window of four practised sessions began at 0.6: a change.
+    // The window of four practiced sessions began at 0.6: a change.
     assert_eq!(history.plateau_factor("th", 1.0, 0.1, &config), 1.0);
-    practised_at(&mut history, 1.0);
+    practiced_at(&mut history, 1.0);
     // Now it began at 0.9: within an uncertainty of 0.15, not of 0.05.
     assert_eq!(history.plateau_factor("th", 1.0, 0.15, &config), 0.5);
     assert_eq!(history.plateau_factor("th", 1.0, 0.05, &config), 1.0);
@@ -478,17 +478,17 @@ fn an_exploration_session_counts_as_practice_and_a_deferral_does_not() {
     history.record(&[event("th", TargetRole::Explore, 4)], [], &config);
     history.record(&[event("th", TargetRole::Deferred, 3)], [], &config);
     let h = history.pattern("th").unwrap();
-    assert_eq!((h.sessions_practised, h.achieved_dose), (1, 4));
-    assert_eq!(h.practised_means, vec![0.5]);
-    assert_eq!(h.last_practised, Some(1));
+    assert_eq!((h.sessions_practiced, h.achieved_dose), (1, 4));
+    assert_eq!(h.practiced_means, vec![0.5]);
+    assert_eq!(h.last_practiced, Some(1));
     assert_eq!(history.sessions(), 2);
 }
 
 #[test]
-fn the_history_answers_whether_a_pattern_or_word_was_practised_within_recent_sessions() {
+fn the_history_answers_whether_a_pattern_or_word_was_practiced_within_recent_sessions() {
     let config = config();
     let mut history = TrainingHistory::new();
-    assert!(!history.practised_within("th", 10));
+    assert!(!history.practiced_within("th", 10));
     assert!(!history.targeted_word_within("the", 10));
 
     history.record(
@@ -501,10 +501,10 @@ fn the_history_answers_whether_a_pattern_or_word_was_practised_within_recent_ses
     // Three sessions recorded: `th` and "the" are from the first, so they
     // are within the last three sessions but not the last two; a deferral
     // is not practice.
-    assert!(history.practised_within("th", 3));
-    assert!(!history.practised_within("th", 2));
-    assert!(history.practised_within("an", 1));
-    assert!(!history.practised_within("he", 3));
+    assert!(history.practiced_within("th", 3));
+    assert!(!history.practiced_within("th", 2));
+    assert!(history.practiced_within("an", 1));
+    assert!(!history.practiced_within("he", 3));
     assert!(history.targeted_word_within("the", 3));
     assert!(history.targeted_word_within("that", 3));
     assert!(!history.targeted_word_within("the", 2));
@@ -577,7 +577,7 @@ fn every_selected_pattern_gets_an_event_even_with_no_exposure() {
 // --- Word exposures ---------------------------------------------------------------
 
 #[test]
-fn a_words_slot_exposes_only_the_deepest_practised_pattern_in_its_chain() {
+fn a_words_slot_exposes_only_the_deepest_practiced_pattern_in_its_chain() {
     let targets = [
         target("at", TargetRole::Target, 0.5),
         target("hat", TargetRole::Explore, 0.5),
@@ -608,7 +608,7 @@ fn a_word_standing_alone_is_read_with_a_space_either_side() {
         target("og", TargetRole::Deferred, 0.0),
     ];
     // Word-initial and word-final patterns are exposed; a deferred
-    // candidate is not practised and so exposes nothing here.
+    // candidate is not practiced and so exposes nothing here.
     assert_eq!(
         word_exposures("tot", &targets),
         BTreeMap::from([(" t", 1), ("t ", 1)])

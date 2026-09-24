@@ -1,4 +1,4 @@
-//! Which patterns a session practises, and what came of practising them.
+//! Which patterns a session practices, and what came of practicing them.
 //!
 //! Every eligible bigram and trigram has a weakness posterior; the
 //! scheduler draws one sample from each, turns it into a priority, and
@@ -54,7 +54,7 @@ impl TargetRole {
     }
 
     /// Whether the prompt's words were chosen to expose the pattern.
-    pub fn is_practised(self) -> bool {
+    pub fn is_practiced(self) -> bool {
         matches!(self, TargetRole::Target | TargetRole::Explore)
     }
 }
@@ -112,14 +112,14 @@ pub struct PatternHistory {
     /// Sessions still to come in which the pattern stays out of candidacy.
     pub deferral_remaining: usize,
     /// Sessions in which it was a target or exploration target.
-    pub sessions_practised: usize,
-    /// Exposures typed across every session it was practised in.
+    pub sessions_practiced: usize,
+    /// Exposures typed across every session it was practiced in.
     pub achieved_dose: usize,
-    /// Its weakness mean at selection in each session it was practised
+    /// Its weakness mean at selection in each session it was practiced
     /// in, in order.
-    pub practised_means: Vec<f64>,
-    /// The ordinal (from one) of the last session it was practised in.
-    pub last_practised: Option<usize>,
+    pub practiced_means: Vec<f64>,
+    /// The ordinal (from one) of the last session it was practiced in.
+    pub last_practiced: Option<usize>,
 }
 
 /// The training events of a profile's sessions in order: the deferral
@@ -166,19 +166,19 @@ impl TrainingHistory {
 
     /// Whether the pattern was a target or exploration target in any of the
     /// last `sessions` sessions recorded.
-    pub fn practised_within(&self, pattern: &str, sessions: usize) -> bool {
+    pub fn practiced_within(&self, pattern: &str, sessions: usize) -> bool {
         self.pattern(pattern)
-            .and_then(|h| h.last_practised)
+            .and_then(|h| h.last_practiced)
             .is_some_and(|last| last + sessions > self.sessions)
     }
 
     /// Every pattern that was a target or exploration target in any of the
     /// last `sessions` sessions recorded, in pattern order.
-    pub fn recently_practised(&self, sessions: usize) -> impl Iterator<Item = &str> {
+    pub fn recently_practiced(&self, sessions: usize) -> impl Iterator<Item = &str> {
         self.patterns
             .keys()
             .map(AsRef::as_ref)
-            .filter(move |p| self.practised_within(p, sessions))
+            .filter(move |p| self.practiced_within(p, sessions))
     }
 
     /// Whether the word was shown as targeted in any of the last `sessions`
@@ -217,10 +217,10 @@ impl TrainingHistory {
                     }
                 }
                 TargetRole::Target | TargetRole::Explore => {
-                    h.sessions_practised += 1;
+                    h.sessions_practiced += 1;
                     h.achieved_dose += event.achieved_dose;
-                    h.practised_means.push(t.weakness_mean);
-                    h.last_practised = Some(session);
+                    h.practiced_means.push(t.weakness_mean);
+                    h.last_practiced = Some(session);
                 }
             }
         }
@@ -230,9 +230,9 @@ impl TrainingHistory {
     }
 
     /// How much a pattern's priority is scaled for having plateaued: one
-    /// unless it has been practised in enough sessions with enough dose and
+    /// unless it has been practiced in enough sessions with enough dose and
     /// its weakness mean has moved less than its current uncertainty since
-    /// the selection `plateau_min_sessions` practised sessions ago; then
+    /// the selection `plateau_min_sessions` practiced sessions ago; then
     /// the plateau factor, recovering linearly to one over the configured
     /// number of untargeted sessions. The comparison looks back over the
     /// practice window rather than to the first selection because a
@@ -249,19 +249,19 @@ impl TrainingHistory {
         let Some(h) = self.pattern(pattern) else {
             return 1.0;
         };
-        let Some(last) = h.last_practised else {
+        let Some(last) = h.last_practiced else {
             return 1.0;
         };
         let window = config.plateau_min_sessions.max(1);
         let Some(&reference) = h
-            .practised_means
+            .practiced_means
             .len()
             .checked_sub(window)
-            .and_then(|i| h.practised_means.get(i))
+            .and_then(|i| h.practiced_means.get(i))
         else {
             return 1.0;
         };
-        let plateaued = h.sessions_practised >= config.plateau_min_sessions
+        let plateaued = h.sessions_practiced >= config.plateau_min_sessions
             && h.achieved_dose > config.plateau_min_dose
             && (weakness_mean - reference).abs() < weakness_sd;
         if !plateaued {
@@ -290,7 +290,7 @@ struct Ranked {
 /// pattern whose deferral window is still running, and one exploration
 /// target. Only patterns with a positive priority can be candidates: a
 /// sample that came out at or below zero says the pattern is not worth
-/// practising this session. Targets come first in rank order; every draw
+/// practicing this session. Targets come first in rank order; every draw
 /// comes from `rng`.
 pub fn select_targets(
     model: &ModelState,
@@ -394,16 +394,16 @@ pub fn same_chain(a: &str, b: &str) -> bool {
 }
 
 /// How many exposures each selected pattern actually received over the
-/// words the user submitted. A slot exposes at most one practised pattern
+/// words the user submitted. A slot exposes at most one practiced pattern
 /// (target or exploration target): the deepest in its back-off chain. A
-/// deferred candidate is not practised, so its incidental exposures are
+/// deferred candidate is not practiced, so its incidental exposures are
 /// counted independently: every slot whose chain contains it. In both
 /// cases at most two slots within one word count toward a pattern's dose.
 /// A word's following space is a slot when the space was typed.
 pub fn achieved_doses(state: &SessionState, targets: &[SelectedTarget]) -> Vec<TrainingEvent> {
-    let practised: BTreeSet<&str> = targets
+    let practiced: BTreeSet<&str> = targets
         .iter()
-        .filter(|t| t.role.is_practised())
+        .filter(|t| t.role.is_practiced())
         .map(|t| t.pattern.as_ref())
         .collect();
     let deferred: BTreeSet<&str> = targets
@@ -424,7 +424,7 @@ pub fn achieved_doses(state: &SessionState, targets: &[SelectedTarget]) -> Vec<T
             .map(|position| prompt.pattern_ending_at(Slot { word, position }))
             .collect();
         let chains = chains.iter().map(String::as_str);
-        for (pattern, count) in exposures_in_word(chains, &practised, &deferred) {
+        for (pattern, count) in exposures_in_word(chains, &practiced, &deferred) {
             *exposures.entry(pattern).or_default() += count;
         }
     }
@@ -437,19 +437,19 @@ pub fn achieved_doses(state: &SessionState, targets: &[SelectedTarget]) -> Vec<T
         .collect()
 }
 
-/// How many exposures of each practised pattern (target or exploration
+/// How many exposures of each practiced pattern (target or exploration
 /// target) one word gives on its own, read as space-padded text with its
 /// following space as a slot; what a word is worth when it is chosen for a
 /// prompt. The same rules as [`achieved_doses`]: a slot exposes only the
-/// deepest practised pattern in its chain and at most two slots count
+/// deepest practiced pattern in its chain and at most two slots count
 /// toward one pattern. Patterns with no exposure are absent.
 pub fn word_exposures<'t>(word: &str, targets: &'t [SelectedTarget]) -> BTreeMap<&'t str, usize> {
-    let practised: BTreeSet<&str> = targets
+    let practiced: BTreeSet<&str> = targets
         .iter()
-        .filter(|t| t.role.is_practised())
+        .filter(|t| t.role.is_practiced())
         .map(|t| t.pattern.as_ref())
         .collect();
-    exposures_in_word(WordChains::new(word).iter(), &practised, &BTreeSet::new())
+    exposures_in_word(WordChains::new(word).iter(), &practiced, &BTreeSet::new())
 }
 
 /// The chain ending at each slot of a word standing alone: the word read as
@@ -485,12 +485,12 @@ impl WordChains {
 /// Counts one word's exposures from the chains ending at each of its slots.
 pub(crate) fn exposures_in_word<'p, 'c>(
     chains: impl Iterator<Item = &'c str>,
-    practised: &BTreeSet<&'p str>,
+    practiced: &BTreeSet<&'p str>,
     deferred: &BTreeSet<&'p str>,
 ) -> BTreeMap<&'p str, usize> {
     let mut in_word: BTreeMap<&'p str, usize> = BTreeMap::new();
     let mut expose = |level: &str| {
-        let level = practised
+        let level = practiced
             .get(level)
             .or_else(|| deferred.get(level))
             .copied()
@@ -502,7 +502,7 @@ pub(crate) fn exposures_in_word<'p, 'c>(
     };
     for chain in chains {
         let levels = chain.char_indices().map(|(i, _)| &chain[i..]);
-        if let Some(level) = levels.clone().find(|l| practised.contains(l)) {
+        if let Some(level) = levels.clone().find(|l| practiced.contains(l)) {
             expose(level);
         }
         for level in levels.filter(|l| deferred.contains(l)) {

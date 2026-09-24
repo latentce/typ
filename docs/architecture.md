@@ -40,7 +40,7 @@ database, and lets the simulator reuse them without re-implementing anything.
 | `compose` | Word selection, probes, contamination, arrangement. |
 | `metrics` | Session summaries, recent series, probe trends, transfer. |
 | `layout` | Key geometry per layout (finger, hand, row, position). |
-| `display` | Colour palette and `NO_COLOR` handling. |
+| `display` | Color palette and `NO_COLOR` handling. |
 | `random` | A seeded ChaCha PRNG so every draw is reproducible. |
 
 ## A run of `typ`
@@ -64,7 +64,7 @@ sequenceDiagram
     T->>C: apply session to the model
     T->>C: record achieved doses in training history
     T->>C: compose next prompt
-    T->>C: summarise against recent series
+    T->>C: summarize against recent series
     T->>S: save events, model, history, summary, next prompt (one transaction)
     T->>U: print results
 ```
@@ -166,6 +166,6 @@ None of this is covered by automated tests. Run through
 | Variable | Effect |
 | --- | --- |
 | `TYP_DATA_DIR` | Directory for `typ.db`. Use a scratch one while developing. |
-| `NO_COLOR` | Bold and underline instead of colour. |
+| `NO_COLOR` | Bold and underline instead of color. |
 | `TYP_DIAGNOSTICS` | Print render timing per input batch to stderr after the results. |
 | `TYP_PANIC_AFTER=n` | Panic after `n` keystrokes, to test terminal restoration. Debug builds only. |

@@ -38,7 +38,7 @@ check:
 sim *args:
     cargo run -q --release -p typ-sim -- {{ args }}
 
-# Run the simulator's integration tests with optimisations on
+# Run the simulator's integration tests with optimizations on
 sim-gate:
     cargo test --release -p typ-sim
 

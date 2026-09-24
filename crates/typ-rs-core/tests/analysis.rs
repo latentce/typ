@@ -562,7 +562,7 @@ fn an_interrupted_session_scores_only_its_submitted_words() {
 // --- Robustness ------------------------------------------------------------------
 
 #[test]
-fn arbitrary_event_logs_are_analysed_without_panicking_and_deterministically() {
+fn arbitrary_event_logs_are_analyzed_without_panicking_and_deterministically() {
     use rand_chacha::ChaCha8Rng;
     use rand_core::{Rng, SeedableRng};
 

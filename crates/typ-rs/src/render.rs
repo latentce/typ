@@ -12,7 +12,7 @@ use crossterm::style::{Attribute, Print, SetAttribute};
 use crossterm::terminal::{Clear, ClearType};
 use typ_rs_core::display::{Cell, Display, Foreground, Palette, Style};
 
-/// Foreground colours as the plain 16-colour SGR codes, which every colour
+/// Foreground colors as the plain 16-color SGR codes, which every color
 /// terminal understands: bright black and red.
 const BRIGHT_BLACK: &str = "\x1b[90m";
 const RED: &str = "\x1b[31m";
@@ -367,14 +367,14 @@ mod tests {
     }
 
     #[test]
-    fn colours_follow_the_palette() {
+    fn colors_follow_the_palette() {
         let state = session("cat", "cx");
         let display = lay_out(&state, view(20, 10));
 
-        let colour = lossy(Painter::new(Palette::Color).frame(&display, false));
-        assert!(colour.contains(BRIGHT_BLACK), "bright black: {colour:?}");
-        assert!(colour.contains(RED), "red: {colour:?}");
-        assert!(colour.contains("\x1b[7m"), "reverse caret: {colour:?}");
+        let color = lossy(Painter::new(Palette::Color).frame(&display, false));
+        assert!(color.contains(BRIGHT_BLACK), "bright black: {color:?}");
+        assert!(color.contains(RED), "red: {color:?}");
+        assert!(color.contains("\x1b[7m"), "reverse caret: {color:?}");
 
         let plain = lossy(Painter::new(Palette::NoColor).frame(&display, false));
         assert!(

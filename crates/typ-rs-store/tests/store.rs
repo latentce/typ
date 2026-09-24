@@ -120,7 +120,7 @@ fn typed(prompt: Prompt, script: &str) -> SessionState {
 
 /// Ends a session the way the binary does: the model is loaded, the session
 /// applied to it, the achieved doses of the session's targets computed, the
-/// session summarised against the recent series, and everything handed to
+/// session summarized against the recent series, and everything handed to
 /// the store with the next prompt.
 fn finish(
     store: &mut Store,
@@ -630,7 +630,7 @@ fn the_next_prompt_records_what_it_was_composed_for() {
 /// Types one session so that a three-word prompt waits for the next, alters
 /// the waiting prompt's recorded context with `change` if given, and starts
 /// a session wanting `word_count` words. Returns the prompt shown and how
-/// many prompts are still waiting afterwards.
+/// many prompts are still waiting afterward.
 fn start_after_context_change(change: Option<&str>, word_count: usize) -> (Prompt, i64) {
     let (_dir, path) = temp_db();
     let (mut store, profile) = open(&path);
@@ -1362,8 +1362,8 @@ fn the_training_history_replays_the_sessions_and_optionally_the_waiting_prompt()
     assert_eq!(showing.sessions(), 3);
     assert_eq!(showing.deferrals().collect::<Vec<_>>(), vec![("og", 1)]);
     let at = history.pattern("at").unwrap();
-    assert_eq!((at.sessions_practised, at.achieved_dose), (1, 2));
-    assert_eq!(at.practised_means, vec![0.5]);
+    assert_eq!((at.sessions_practiced, at.achieved_dose), (1, 2));
+    assert_eq!(at.practiced_means, vec![0.5]);
     // The second session's prompt showed "cat" as targeted; the waiting
     // prompt's probes-only words add nothing.
     assert!(history.targeted_word_within("cat", 1));
@@ -1580,7 +1580,7 @@ fn a_prompts_words_read_back_with_their_roles_and_contamination() {
     assert_eq!(started.words, composed.words);
     assert_eq!(store.session(started.id).unwrap().words, composed.words);
 
-    // Typed and summarised: "dog" is the one contaminated probe, "the" the
+    // Typed and summarized: "dog" is the one contaminated probe, "the" the
     // one clear of practice.
     let state = typed(started.prompt, "cat dog the");
     finish(&mut store, &profile, started.id, 1_000, &state, "next").unwrap();

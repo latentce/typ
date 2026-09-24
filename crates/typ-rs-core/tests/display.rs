@@ -285,7 +285,7 @@ fn degenerate_viewports_are_tolerated() {
 }
 
 #[test]
-fn colour_and_no_color_palettes_map_each_class_to_a_style() {
+fn color_and_no_color_palettes_map_each_class_to_a_style() {
     let style = |class: CellClass, palette: Palette| class.style(palette);
     let plain = Style::default();
     assert_eq!(plain.foreground, Foreground::Default);

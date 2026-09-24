@@ -6,7 +6,7 @@
 //!
 //! The database is opened once per process. Sessions, prompts, and input
 //! events are the source of truth: a session's row is written before it
-//! starts and its events at the end, and neither is changed afterwards.
+//! starts and its events at the end, and neither is changed afterward.
 //! Everything else is a cache rebuilt from them: the pattern statistics
 //! whenever the model version changes, the next prompt when a session
 //! ends. Nothing here runs while a session is being typed.

@@ -37,7 +37,7 @@ const DATABASE_FILE: &str = "typ.db";
 static VERSION: LazyLock<String> = LazyLock::new(|| {
     format!(
         "{}\n\
-         Licence: MIT\n\
+         License: MIT\n\
          Corpus: English words (corpus version {CORPUS_VERSION}) derived from the\n\
          Google Books Ngram Viewer Exports v3 via orgtre/google-books-ngram-frequency,\n\
          licensed CC BY 3.0 <https://creativecommons.org/licenses/by/3.0/>.",
@@ -122,7 +122,7 @@ fn main() -> ExitCode {
 
 /// Runs one session: the row is written before raw mode is entered and the
 /// events are saved after it is left, so the database is never touched while
-/// the user types. Afterwards the session is applied to the profile's
+/// the user types. Afterward the session is applied to the profile's
 /// pattern statistics, what came of its targets is recorded, the next
 /// prompt is composed from the updated model, and everything is saved in
 /// one transaction. The prompt composed ahead for the next run is sized for
@@ -209,7 +209,7 @@ struct Ended {
 
 /// Ends a finished session: applies it to the profile's model, records
 /// what came of its targets, composes the next prompt from the updated
-/// model, summarises the session against the recent series, saves
+/// model, summarizes the session against the recent series, saves
 /// everything in one transaction, and returns the results block to print.
 /// The results are composed before the save so that a persistence failure
 /// still shows them; they come from the same analysis the statistics were
@@ -440,7 +440,7 @@ mod tests {
     use typ_rs_store::DEFAULT_PROFILE;
 
     #[test]
-    fn render_diagnostics_summarise_the_batches() {
+    fn render_diagnostics_summarize_the_batches() {
         assert_eq!(
             render_diagnostics(&[100, 300, 200]),
             "render: 3 batches, mean 200 µs, max 300 µs"

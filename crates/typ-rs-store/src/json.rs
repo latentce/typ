@@ -21,7 +21,7 @@ pub(crate) fn string_array(json: &str) -> Result<Vec<Box<str>>> {
 }
 
 /// A probe's contamination from its stored object. The roles of the
-/// neighbouring words are recorded there too but are not read back.
+/// neighboring words are recorded there too but are not read back.
 pub(crate) fn contamination(json: &str) -> Result<Contamination> {
     let Value::Object(members) = Parser::new(json).value()? else {
         return Err(corrupt("contamination is not an object"));

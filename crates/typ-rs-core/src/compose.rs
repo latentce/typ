@@ -7,11 +7,11 @@
 //! session is all probes.
 //!
 //! Targeted words are chosen one at a time from a pool of every word
-//! containing a practised pattern plus a frequency-weighted sample of
+//! containing a practiced pattern plus a frequency-weighted sample of
 //! others. Each pick is a softmax draw over a word score that rewards the
 //! coverage the word adds (its exposures of targets still short of their
 //! dose, saturating per target so every target gets its share), prefers
-//! common words, and penalises words drilled recently, words that stack too
+//! common words, and penalizes words drilled recently, words that stack too
 //! many targets, and long words. Probes are drawn from the reference
 //! distribution with no filtering at all, so that their measurement stays
 //! comparable across sessions; how much each overlaps recent practice is
@@ -74,7 +74,7 @@ pub struct Contamination {
 #[derive(Debug, Clone, PartialEq)]
 pub struct ComposedWord {
     pub role: WordRole,
-    /// The practised patterns (targets and exploration target) the word
+    /// The practiced patterns (targets and exploration target) the word
     /// exposes, in pattern order; empty for a probe, whose overlap is in its
     /// contamination instead.
     pub exposed_targets: Vec<Box<str>>,
@@ -122,8 +122,8 @@ impl ComposedPrompt {
 
     /// The patterns the prompt's words were chosen to expose: targets first,
     /// then the exploration target.
-    pub fn practised(&self) -> impl Iterator<Item = &SelectedTarget> {
-        self.targets.iter().filter(|t| t.role.is_practised())
+    pub fn practiced(&self) -> impl Iterator<Item = &SelectedTarget> {
+        self.targets.iter().filter(|t| t.role.is_practiced())
     }
 
     /// The words shown as targeted, in prompt order.
@@ -199,9 +199,9 @@ pub fn next_prompt(
 }
 
 /// Builds a prompt of `word_count` words around already selected targets:
-/// `targeted_count` words chosen to expose the practised ones (fewer only
+/// `targeted_count` words chosen to expose the practiced ones (fewer only
 /// if the corpus runs out of distinct words), the rest probes, shuffled
-/// together with exposures of one target spread apart. With no practised
+/// together with exposures of one target spread apart. With no practiced
 /// pattern every word is a probe, in the order drawn. Every draw comes from
 /// `rng`.
 pub fn compose(
@@ -214,16 +214,16 @@ pub fn compose(
     rng: &mut Rng,
 ) -> ComposedPrompt {
     let reference = ReferenceDistribution::new(corpus);
-    let practised: Vec<&SelectedTarget> =
-        targets.iter().filter(|t| t.role.is_practised()).collect();
-    let mut words = if practised.is_empty() {
+    let practiced: Vec<&SelectedTarget> =
+        targets.iter().filter(|t| t.role.is_practiced()).collect();
+    let mut words = if practiced.is_empty() {
         Vec::new()
     } else {
-        Selection::new(corpus, config, history, &reference, &practised, rng)
+        Selection::new(corpus, config, history, &reference, &practiced, rng)
             .pick(targeted_count.min(word_count), rng)
     };
     let targeted_words: BTreeSet<&str> = words.iter().map(|w| corpus.text(w.id)).collect();
-    let recent: BTreeSet<&str> = practised.iter().map(|t| t.pattern.as_ref()).collect();
+    let recent: BTreeSet<&str> = practiced.iter().map(|t| t.pattern.as_ref()).collect();
     while words.len() < word_count {
         let id = reference.sample(rng);
         // A probe's exposures count for spacing, though it is not recorded
@@ -259,7 +259,7 @@ pub fn compose(
                     .into_iter()
                     .filter(|p| {
                         recent.contains(p.as_str())
-                            || history.practised_within(p, config.contamination_sessions)
+                            || history.practiced_within(p, config.contamination_sessions)
                     })
                     .map(Box::from)
                     .collect(),
@@ -287,7 +287,7 @@ pub fn compose(
 struct PlacedWord {
     id: WordId,
     role: WordRole,
-    /// The practised patterns the word exposes, in pattern order, whatever
+    /// The practiced patterns the word exposes, in pattern order, whatever
     /// its role.
     exposed: Vec<Box<str>>,
     score: Option<f64>,
@@ -311,9 +311,9 @@ struct CandidateWord {
     taken: bool,
 }
 
-/// A candidate word's exposures of one practised pattern.
+/// A candidate word's exposures of one practiced pattern.
 struct PatternExposures {
-    /// Index into the practised list.
+    /// Index into the practiced list.
     pattern: usize,
     /// How many slots count.
     count: usize,
@@ -322,7 +322,7 @@ struct PatternExposures {
     fresh_coverage: f64,
 }
 
-/// How far one practised pattern's coverage has come as the prompt fills.
+/// How far one practiced pattern's coverage has come as the prompt fills.
 struct TargetCoverage {
     weight: f64,
     dose: usize,
@@ -336,9 +336,9 @@ struct TargetCoverage {
 /// The state of choosing a prompt's targeted words.
 struct Selection<'a> {
     config: &'a SchedulerConfig,
-    practised: &'a [&'a SelectedTarget],
+    practiced: &'a [&'a SelectedTarget],
     candidates: Vec<CandidateWord>,
-    /// One per practised pattern, in the same order.
+    /// One per practiced pattern, in the same order.
     coverage: Vec<TargetCoverage>,
     /// The marginal gain that counts as one unit before the log.
     gain_unit: f64,
@@ -350,10 +350,10 @@ impl<'a> Selection<'a> {
         config: &'a SchedulerConfig,
         history: &TrainingHistory,
         reference: &ReferenceDistribution,
-        practised: &'a [&'a SelectedTarget],
+        practiced: &'a [&'a SelectedTarget],
         rng: &mut Rng,
     ) -> Selection<'a> {
-        let mut pool: BTreeSet<WordId> = practised
+        let mut pool: BTreeSet<WordId> = practiced
             .iter()
             .flat_map(|t| corpus.words_containing(&t.pattern))
             .copied()
@@ -362,15 +362,15 @@ impl<'a> Selection<'a> {
             pool.insert(reference.sample(rng));
         }
 
-        let index: BTreeMap<&str, usize> = practised
+        let index: BTreeMap<&str, usize> = practiced
             .iter()
             .enumerate()
             .map(|(i, t)| (t.pattern.as_ref(), i))
             .collect();
         let patterns: BTreeSet<&str> = index.keys().copied().collect();
-        let coverage: Vec<TargetCoverage> = coverage_weights(practised)
+        let coverage: Vec<TargetCoverage> = coverage_weights(practiced)
             .into_iter()
-            .zip(practised)
+            .zip(practiced)
             .map(|(weight, t)| TargetCoverage {
                 weight,
                 dose: t.planned_dose.max(1),
@@ -420,7 +420,7 @@ impl<'a> Selection<'a> {
             .fold(0.0, f64::max);
         Selection {
             config,
-            practised,
+            practiced,
             candidates,
             coverage,
             gain_unit: top_fresh_gain / config.coverage_scale,
@@ -459,7 +459,7 @@ impl<'a> Selection<'a> {
             let mut exposed: Vec<Box<str>> = candidate
                 .exposures
                 .iter()
-                .map(|e| self.practised[e.pattern].pattern.clone())
+                .map(|e| self.practiced[e.pattern].pattern.clone())
                 .collect();
             exposed.sort();
             chosen.push(PlacedWord {
@@ -518,14 +518,14 @@ fn coverage_of(exposures: usize, dose: usize) -> f64 {
     1.0 - (-(exposures as f64) / dose as f64).exp()
 }
 
-/// How much each practised pattern's coverage counts: its priority, except
+/// How much each practiced pattern's coverage counts: its priority, except
 /// that the exploration target, chosen for its uncertainty rather than its
 /// rank, counts at least as much as the average target so it is actually
-/// practised. A weight that would still be zero takes the average too, or
+/// practiced. A weight that would still be zero takes the average too, or
 /// one when no pattern has a positive priority, so that coverage drives
 /// selection whatever the priorities were.
-fn coverage_weights(practised: &[&SelectedTarget]) -> Vec<f64> {
-    let positive: Vec<f64> = practised
+fn coverage_weights(practiced: &[&SelectedTarget]) -> Vec<f64> {
+    let positive: Vec<f64> = practiced
         .iter()
         .filter(|t| t.role == TargetRole::Target && t.priority > 0.0)
         .map(|t| t.priority)
@@ -535,7 +535,7 @@ fn coverage_weights(practised: &[&SelectedTarget]) -> Vec<f64> {
     } else {
         positive.iter().sum::<f64>() / positive.len() as f64
     };
-    practised
+    practiced
         .iter()
         .map(|t| match t.role {
             TargetRole::Explore => t.priority.max(mean_target),
@@ -599,7 +599,7 @@ fn close_pairs(words: &[PlacedWord], gap: usize) -> usize {
 /// when the walk reaches its new position. When no later word will do,
 /// as happens toward the end, the word or the one it clashes with is
 /// moved to the first position anywhere in the prompt where both then sit
-/// clear of their neighbours on either side.
+/// clear of their neighbors on either side.
 fn space_exposures(words: &mut [PlacedWord], gap: usize) {
     if gap < 2 {
         return;

@@ -12,7 +12,7 @@ use typ_rs_core::scheduler::{
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Scheduler {
     /// Every word drawn from the reference distribution; no targeting at
-    /// all. What practising without a scheduler looks like.
+    /// all. What practicing without a scheduler looks like.
     Random,
     /// The patterns with the highest training value by their posterior
     /// mean, and nothing else: no sampling, no deferral, no exploration, no

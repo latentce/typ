@@ -39,7 +39,7 @@ fn typ(args: &[&str]) -> Run {
 
 /// Types `script` against `prompt`, one key per 100 ms, and stores the
 /// session as started at `started_at`, applied to the profile's statistics
-/// and summarised the way a live session is. Whatever prompt is waiting is
+/// and summarized the way a live session is. Whatever prompt is waiting is
 /// replaced by `prompt` again, as probes only, so every session in a test
 /// types `prompt`. `⌫` is backspace and `⎋` an interrupt.
 fn store_session(store: &mut Store, started_at: i64, prompt: &str, script: &str) {
@@ -47,7 +47,7 @@ fn store_session(store: &mut Store, started_at: i64, prompt: &str, script: &str)
 }
 
 /// As [`store_session`], with the given patterns selected for the prompt
-/// waiting afterwards and the given words of it shown as targeted.
+/// waiting afterward and the given words of it shown as targeted.
 fn store_session_with(
     store: &mut Store,
     started_at: i64,
@@ -132,7 +132,7 @@ fn target(pattern: &str, role: TargetRole) -> SelectedTarget {
 }
 
 #[test]
-fn version_shows_the_licence_and_the_corpus_attribution_under_both_flags() {
+fn version_shows_the_license_and_the_corpus_attribution_under_both_flags() {
     for flag in ["--version", "-V"] {
         let run = typ(&[flag]);
         let stdout = &run.stdout;
@@ -142,7 +142,7 @@ fn version_shows_the_licence_and_the_corpus_attribution_under_both_flags() {
             stdout.starts_with(&format!("typ {}\n", env!("CARGO_PKG_VERSION"))),
             "{flag}: {stdout}"
         );
-        assert!(stdout.contains("Licence: MIT"), "{flag}: {stdout}");
+        assert!(stdout.contains("License: MIT"), "{flag}: {stdout}");
         assert!(stdout.contains("Google Books"), "{flag}: {stdout}");
         assert!(stdout.contains("CC BY 3.0"), "{flag}: {stdout}");
         assert!(
@@ -249,7 +249,7 @@ fn stats_lists_completed_sessions_most_recent_first_and_skips_interrupted_ones()
 }
 
 #[test]
-fn stats_shows_transfer_of_recently_practised_patterns_to_untargeted_words() {
+fn stats_shows_transfer_of_recently_practiced_patterns_to_untargeted_words() {
     let dir = tempfile::tempdir().unwrap();
     {
         let mut store = Store::open(&dir.path().join("typ.db")).unwrap();
@@ -498,9 +498,9 @@ fn config_rejects_invalid_values_with_one_line_and_changes_nothing() {
 
 #[test]
 fn an_unknown_setting_fails() {
-    let run = typ(&["config", "colour"]);
+    let run = typ(&["config", "color"]);
     assert!(!run.ok);
-    assert!(run.stderr.contains("colour"), "{}", run.stderr);
+    assert!(run.stderr.contains("color"), "{}", run.stderr);
 }
 
 #[test]

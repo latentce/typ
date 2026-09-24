@@ -234,12 +234,12 @@ fn typed_fully(composed: &ComposedPrompt) -> SessionState {
 }
 
 #[test]
-fn targeted_words_are_distinct_corpus_words_that_expose_practised_patterns() {
+fn targeted_words_are_distinct_corpus_words_that_expose_practiced_patterns() {
     let corpus = Corpus::bundled();
     for seed in 0..5 {
         let composed = compose_after(5, 50, seed);
-        let practised: Vec<&str> = composed.practised().map(|t| t.pattern.as_ref()).collect();
-        assert!(!practised.is_empty());
+        let practiced: Vec<&str> = composed.practiced().map(|t| t.pattern.as_ref()).collect();
+        assert!(!practiced.is_empty());
         let mut seen = HashSet::new();
         let mut exposing = 0;
         for (word, meta) in words_with_meta(&composed) {
@@ -249,7 +249,7 @@ fn targeted_words_are_distinct_corpus_words_that_expose_practised_patterns() {
                     assert!(
                         meta.exposed_targets
                             .iter()
-                            .all(|p| padded.contains(p.as_ref()) && practised.contains(&p.as_ref())),
+                            .all(|p| padded.contains(p.as_ref()) && practiced.contains(&p.as_ref())),
                         "{word:?} does not expose {:?}",
                         meta.exposed_targets
                     );
@@ -274,7 +274,7 @@ fn targeted_words_are_distinct_corpus_words_that_expose_practised_patterns() {
 }
 
 #[test]
-fn every_practised_pattern_reaches_its_dose_when_the_corpus_allows() {
+fn every_practiced_pattern_reaches_its_dose_when_the_corpus_allows() {
     let config = config();
     for seed in 0..10 {
         let mut selected = targets(&["th", "an", "in", "er", "on"]);
@@ -302,7 +302,7 @@ fn targets_the_scheduler_selects_reach_their_dose_or_exhaust_the_corpus() {
         let composed = compose_after(7, 50, seed);
         assert_eq!(targeted_count(&composed), 40);
         let events = achieved_doses(&typed_fully(&composed), &composed.targets);
-        for e in events.iter().filter(|e| e.target.role.is_practised()) {
+        for e in events.iter().filter(|e| e.target.role.is_practiced()) {
             // A pattern in few corpus words cannot be exposed more often
             // than once per distinct word.
             let possible = config
@@ -319,7 +319,7 @@ fn targets_the_scheduler_selects_reach_their_dose_or_exhaust_the_corpus() {
 }
 
 #[test]
-fn the_exploration_target_is_practised_however_low_its_priority() {
+fn the_exploration_target_is_practiced_however_low_its_priority() {
     let config = config();
     let selected = vec![
         target("th", TargetRole::Target, 0.9),
@@ -334,7 +334,7 @@ fn the_exploration_target_is_practised_however_low_its_priority() {
 }
 
 #[test]
-fn a_word_shown_as_targeted_within_the_recent_window_is_penalised() {
+fn a_word_shown_as_targeted_within_the_recent_window_is_penalized() {
     let config = greedy();
     let selected = || targets(&["th"]);
     // The best word for `th` is the most common one containing it.
@@ -356,39 +356,39 @@ fn a_word_shown_as_targeted_within_the_recent_window_is_penalised() {
 }
 
 #[test]
-fn a_word_stacking_more_targets_than_the_overload_limit_is_penalised() {
+fn a_word_stacking_more_targets_than_the_overload_limit_is_penalized() {
     // "the" exposes all four: word-initial `t`, `th`, `he`, and `e` before
     // the space.
     let selected = || targets(&[" t", "th", "he", "e "]);
-    let unpenalised = SchedulerConfig {
+    let unpenalized = SchedulerConfig {
         overload_penalty: 0.0,
         ..greedy()
     };
-    let composed = compose_with(&unpenalised, &TrainingHistory::new(), selected(), 1, 1, 1);
+    let composed = compose_with(&unpenalized, &TrainingHistory::new(), selected(), 1, 1, 1);
     assert_eq!(the_targeted_word(&composed), "the");
     assert_eq!(composed.words[0].exposed_targets.len(), 4);
 
-    let penalised = SchedulerConfig {
+    let penalized = SchedulerConfig {
         overload_penalty: 10.0,
         ..greedy()
     };
-    let composed = compose_with(&penalised, &TrainingHistory::new(), selected(), 1, 1, 1);
+    let composed = compose_with(&penalized, &TrainingHistory::new(), selected(), 1, 1, 1);
     assert!(
-        composed.words[0].exposed_targets.len() <= penalised.overload_targets,
+        composed.words[0].exposed_targets.len() <= penalized.overload_targets,
         "{:?}",
         composed.words[0]
     );
 }
 
 #[test]
-fn a_word_longer_than_the_limit_is_penalised() {
+fn a_word_longer_than_the_limit_is_penalized() {
     let corpus = Corpus::bundled();
     let selected = || targets(&["ati"]);
-    let unpenalised = SchedulerConfig {
+    let unpenalized = SchedulerConfig {
         length_penalty: 0.0,
         ..greedy()
     };
-    let composed = compose_with(&unpenalised, &TrainingHistory::new(), selected(), 5, 5, 1);
+    let composed = compose_with(&unpenalized, &TrainingHistory::new(), selected(), 5, 5, 1);
     let lengths = |c: &ComposedPrompt| -> Vec<usize> {
         c.targeted_words()
             .map(|w| corpus.word_by_text(w).unwrap().length as usize)
@@ -397,20 +397,20 @@ fn a_word_longer_than_the_limit_is_penalised() {
     assert!(
         lengths(&composed)
             .iter()
-            .any(|&l| l > unpenalised.long_word_length),
+            .any(|&l| l > unpenalized.long_word_length),
         "{:?}",
         composed.prompt
     );
 
-    let penalised = SchedulerConfig {
+    let penalized = SchedulerConfig {
         length_penalty: 10.0,
         ..greedy()
     };
-    let composed = compose_with(&penalised, &TrainingHistory::new(), selected(), 5, 5, 1);
+    let composed = compose_with(&penalized, &TrainingHistory::new(), selected(), 5, 5, 1);
     assert!(
         lengths(&composed)
             .iter()
-            .all(|&l| l <= penalised.long_word_length),
+            .all(|&l| l <= penalized.long_word_length),
         "{:?}",
         composed.prompt
     );

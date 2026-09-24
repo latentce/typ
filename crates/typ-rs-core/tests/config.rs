@@ -96,7 +96,7 @@ fn every_tunable_appears_by_name_in_the_json() {
         "root_prior_errors",
         "root_prior_correct",
         "latency_variance_prior",
-        "offset_regulariser",
+        "offset_regularizer",
         "interrupted_min_clean_intervals",
         "context_refit_sessions",
         "context_ridge_lambda",

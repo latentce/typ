@@ -1,11 +1,11 @@
-# How typ decides what you practise
+# How typ decides what you practice
 
 This is the path from the keystrokes of one session to the prompt of the
 next. Every number below is a default; the full list is at the end.
 
 ```mermaid
 flowchart LR
-    A["You type a prompt"] --> B["Analyse the session"]
+    A["You type a prompt"] --> B["Analyze the session"]
     B --> C["Update per-pattern statistics"]
     C --> D["Score each pattern's weakness"]
     D --> E["Pick targets"]
@@ -90,7 +90,7 @@ honest.
 tracks your current typical speed). What you did last month matters less than
 what you did yesterday.
 
-**Latencies are normalised before they are stored.** A raw latency is not
+**Latencies are normalized before they are stored.** A raw latency is not
 stored; what is stored is
 
 ```
@@ -179,7 +179,7 @@ one. `typ stats` shows both (`+0.42 ± 0.18`).
 ## 5. Picking targets
 
 Only bigrams and trigrams are ever targets (a single character is too coarse
-to practise). A pattern is **eligible** if it appears in at least five corpus
+to practice). A pattern is **eligible** if it appears in at least five corpus
 words and its **importance** (square root of its frequency in the corpus) is
 above a floor. Importance is what makes `th` worth more attention than `xq`.
 
@@ -192,7 +192,7 @@ flowchart TD
     E --> F["Candidates (up to 8)"]
     F --> G{"25% coin flip, each"}
     G -->|"held back"| H["Deferred: out of candidacy for 3 sessions"]
-    G -->|"practised"| I["Target (up to 5)"]
+    G -->|"practiced"| I["Target (up to 5)"]
     A --> J["One exploration target,<br/>drawn ∝ importance × uncertainty"]
 ```
 
@@ -204,7 +204,7 @@ uncertainty will sometimes sample high and get tried, which is how typ
 discovers weaknesses it has little evidence for. This is Thompson sampling.
 
 **One per chain.** Never both `th` and `ath` in one session: they would be
-practised by the same words and their evidence would be confounded.
+practiced by the same words and their evidence would be confounded.
 
 **Deferral.** A quarter of candidates are randomly held out for three
 sessions. They still appear in prompts at their natural rate; what they do
@@ -217,7 +217,7 @@ move over time is the only way to tell practice from regression to the mean
 importance × uncertainty, ignoring rank. It gets the same dose as a target.
 Shown as `(exploring ...)` on the `next:` line.
 
-**Plateau.** A target practised in four or more sessions with over twenty
+**Plateau.** A target practiced in four or more sessions with over twenty
 exposures, whose weakness mean has moved less than its own uncertainty over
 that span, has plateaued. Its priority is halved, recovering linearly over
 the next ten sessions it goes untargeted. Practice that is not working makes
@@ -237,7 +237,7 @@ room for practice that might.
 
 The rest are **probes**: words drawn from a fixed frequency-weighted
 distribution over the corpus, independent of you. Probes are the yardstick.
-They are never filtered, so a word you happen to be practising can turn up as
+They are never filtered, so a word you happen to be practicing can turn up as
 a probe; instead typ records that it did (**contamination**: the word or its
 patterns were targeted in this prompt or the last ten sessions), so the
 reports can separate clean transfer evidence from contaminated.
@@ -246,7 +246,7 @@ reports can separate clean transfer evidence from contaminated.
 
 Each target has a **dose**: six exposures per prompt. A word exposes a target
 once per slot whose chain contains it, but at most twice per word, and a slot
-counts toward only the deepest practised pattern in its chain (a slot whose
+counts toward only the deepest practiced pattern in its chain (a slot whose
 trigram is a target does not also count for the bigram).
 
 Words are picked one at a time from a pool (every corpus word containing a
@@ -267,7 +267,7 @@ worth less than the last, and a target that has its dose is worth nothing
 more. Without this, the hundreds of words containing a common target would
 crowd out the few containing a rare one. Coverage is weighted by each
 target's priority, and the exploration target counts at least as much as an
-average target so it actually gets practised.
+average target so it actually gets practiced.
 
 The frequency term keeps the words real. The penalties stop the prompt being
 the same ten words every session, stop one word carrying every target, and
@@ -300,7 +300,7 @@ flowchart LR
 The model already knows how slow each pattern is for you. So it can predict
 how long this session's clean slots *should* have taken on a typical day.
 The ratio of predicted to actual is how well you typed relative to your own
-norm, with the prompt's difficulty cancelled out. Applied to the model's
+norm, with the prompt's difficulty canceled out. Applied to the model's
 prediction for a fixed 1,000-word sample of ordinary text, that gives the
 speed you would have shown on standard material.
 
@@ -319,7 +319,7 @@ anything you have recently drilled.
 
 ### Transfer
 
-For each recently practised pattern, `typ stats` shows how you type it in
+For each recently practiced pattern, `typ stats` shows how you type it in
 words that were used to drill it versus words that were not. If the drilled
 words got fast and the others did not, you learned the words. If both did,
 you learned the pattern.
@@ -343,7 +343,7 @@ override any of them with `--set name=value`; see
 | `kappa` | 10 | pseudo-observations from the parent when estimating |
 | `root_prior_errors`, `root_prior_correct` | 1, 19 | Beta prior on error and hesitation rates |
 | `latency_variance_prior` | 0.1 | prior variance of log-latency |
-| `offset_regulariser` | 20 | pull of the session offset toward zero |
+| `offset_regularizer` | 20 | pull of the session offset toward zero |
 | `interrupted_min_clean_intervals` | 20 | an interrupted session needs this many to count |
 | `context_refit_sessions` | 5 | refit the context model every this many completed sessions |
 | `context_ridge_lambda` | 1.0 | ridge penalty on the context model |

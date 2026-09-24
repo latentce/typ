@@ -1,5 +1,5 @@
 -- Source of truth: written while a session runs and at its end, never
--- modified afterwards. Everything derived from these tables is a cache that
+-- modified afterward. Everything derived from these tables is a cache that
 -- can be rebuilt from them. Times are Unix seconds unless the column says
 -- otherwise; JSON columns hold text.
 

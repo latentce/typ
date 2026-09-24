@@ -63,7 +63,7 @@ fn filter_keeps_the_ten_thousand_most_frequent_remaining_words_in_rank_order() {
 }
 
 #[test]
-fn frequency_weight_is_square_root_of_frequency_normalised_over_retained_words() {
+fn frequency_weight_is_square_root_of_frequency_normalized_over_retained_words() {
     let corpus = corpus(&[("I", 4), ("to", 3), ("a", 1)]);
 
     let to = &corpus.words()[0];
@@ -74,7 +74,7 @@ fn frequency_weight_is_square_root_of_frequency_normalised_over_retained_words()
     assert!((a.frequency_weight - 0.5).abs() < 1e-12);
 }
 
-// Running text is modelled as words drawn by frequency, each followed by a
+// Running text is modeled as words drawn by frequency, each followed by a
 // space: "to to a to ..." Here 75% of words are "to" (3 slots) and 25% are
 // "a" (2 slots), so a word contributes 2.75 slots on average. A pattern's
 // frequency is the probability that a random slot ends it.

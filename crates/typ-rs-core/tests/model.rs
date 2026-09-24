@@ -381,7 +381,7 @@ fn the_session_offset_is_the_median_residual_shrunk_toward_zero_for_short_sessio
     );
     assert!(long_offset < 2f64.ln());
     // 62 clean intervals (63 keystrokes less the first) against a
-    // regulariser of 20.
+    // regularizer of 20.
     assert!(close(long_offset, 2f64.ln() * 62.0 / 82.0), "{long_offset}");
 
     // The residuals stored for the pattern have the offset removed: the
@@ -780,13 +780,13 @@ fn the_session_offset_is_measured_after_removing_the_context_effect() {
         .collect();
     residuals.sort_by(f64::total_cmp);
     let n = residuals.len() as f64;
-    let expected = residuals[residuals.len() / 2] * n / (n + config.offset_regulariser);
+    let expected = residuals[residuals.len() / 2] * n / (n + config.offset_regularizer);
     assert!(
         close(applied.session_offset, expected),
         "{} vs {expected}",
         applied.session_offset
     );
-    let plain = (0.3f64.ln() - baseline) * n / (n + config.offset_regulariser);
+    let plain = (0.3f64.ln() - baseline) * n / (n + config.offset_regularizer);
     assert!(!close(applied.session_offset, plain));
 }
 

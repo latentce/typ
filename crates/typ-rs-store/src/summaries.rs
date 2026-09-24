@@ -17,7 +17,7 @@ impl Store {
     }
 }
 
-/// The recent series as of the latest summarised session of the profile
+/// The recent series as of the latest summarized session of the profile
 /// that started before `before` (a start time and id), or of all of them.
 pub(crate) fn recent_before(
     conn: &Connection,

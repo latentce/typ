@@ -72,7 +72,7 @@ fn the_rows_are_staggered_so_a_column_leans_right_going_down() {
     assert_eq!(x('q'), -0.25);
     assert_eq!(x('z'), 0.5);
     assert_eq!(x('s') - x('a'), 1.0);
-    // The space bar is centred between the hands.
+    // The space bar is centered between the hands.
     assert_eq!(x(' '), 4.5);
 }
 

@@ -15,7 +15,7 @@ next: th, ou␣, ing (exploring ␣wr)
 - Prompts are real English words, not random letter soup.
 - Everything runs locally in a single SQLite file. No account, no network.
 - It tracks characters, bigrams, and trigrams (spaces included), so "the end
-  of words that finish in `ou`" is a thing it can notice and practise.
+  of words that finish in `ou`" is a thing it can notice and practice.
 - It measures whether the practice actually transfers to ordinary text, and
   is honest about the difference between a real gain and noise.
 
@@ -51,7 +51,7 @@ When you finish, three lines print:
 | --- | --- |
 | `68 wpm  96.2% raw  99.4% final  71% consistency` | Gross WPM; accuracy on your first try at each character; accuracy of what you submitted after corrections; how even your keystroke timing was. |
 | `74 wpm on standard text  +3 vs recent` | Your speed translated to ordinary text. Targeted prompts are deliberately harder, so raw WPM drops when targeting kicks in; this figure corrects for that and is the one to watch. `baseline recorded` on your first session. |
-| `next: th, ou␣, ing (exploring ␣wr)` | The patterns the next prompt will practise, weakest first, plus one the model is merely unsure about. `␣` is a space, so `ou␣` means "words ending in ou". |
+| `next: th, ou␣, ing (exploring ␣wr)` | The patterns the next prompt will practice, weakest first, plus one the model is merely unsure about. `␣` is a space, so `ou␣` means "words ending in ou". |
 
 Your first session is a plain sample of common words. From the second session
 on, part of the prompt targets your weaknesses; that share ramps from 30% to
@@ -88,7 +88,7 @@ Shows your last ten sessions, then:
   `sustained decline` only when the change is statistically separable from
   the hundred before.
 - **word initiation**: median time to start each word, per session.
-- **transfer to untargeted words**: for each recently practised pattern, how
+- **transfer to untargeted words**: for each recently practiced pattern, how
   you type it in words used for drilling versus words that were not.
 - **slowest / most error-prone / weakest patterns**, each with how much
   evidence backs the estimate.
@@ -108,7 +108,7 @@ algorithm.
 
 | Variable | Effect |
 | --- | --- |
-| `NO_COLOR` | Bold and underline instead of colour. |
+| `NO_COLOR` | Bold and underline instead of color. |
 | `TYP_DATA_DIR` | Use this directory for the database instead of the platform default. |
 
 Data lives in one file: `~/.local/share/typ/typ.db` on Linux,
@@ -129,7 +129,7 @@ You need a Rust toolchain and [`just`](https://github.com/casey/just).
 | `just fmt` | `cargo fmt --all`. |
 | `just check` | Format check, lint, and tests. Run before committing. |
 | `just sim [args]` | Run the simulator against synthetic typists (release build). |
-| `just sim-gate` | The simulator's integration tests with optimisations on. |
+| `just sim-gate` | The simulator's integration tests with optimizations on. |
 | `just doc` | Build and open rustdoc for the workspace. |
 | `just install` / `just uninstall` | Install `typ` from this checkout into `~/.cargo/bin`, or remove it. |
 
@@ -160,7 +160,7 @@ docs/
 The terminal loop is checked by hand; run through
 [`docs/smoke-test.md`](docs/smoke-test.md) after touching `crates/typ-rs/src/`.
 
-## Licence
+## License
 
 [MIT](LICENSE-MIT).
 
@@ -168,5 +168,5 @@ The bundled word list is derived from the English unigram list in
 [orgtre/google-books-ngram-frequency](https://github.com/orgtre/google-books-ngram-frequency),
 computed from the Google Books Ngram Viewer Exports v3, both under
 [CC BY 3.0](https://creativecommons.org/licenses/by/3.0/). The unmodified
-source and licence text are in
+source and license text are in
 [`crates/typ-rs-core/corpus/`](crates/typ-rs-core/corpus/).

@@ -21,7 +21,7 @@ just sim --list-tunables
 ```
 
 Runs are seeded and reproducible. `just sim-gate` runs the integration tests
-in `crates/typ-sim/tests/` with optimisations on, which is the only way the
+in `crates/typ-sim/tests/` with optimizations on, which is the only way the
 100 ms end-of-session budget is asserted at its real value.
 
 ## Learners
@@ -40,8 +40,8 @@ They differ in what practice does to them:
 | `trainable` | `ar` is 2.7× slower and 25 points more error-prone | every exposure, in any word, shrinks the gap by a power law |
 | `awkward` | `ch`, just as bad | nothing; it never improves |
 | `fatigue` | none | nothing; every third session is tired, and each session starts slow and gets slower |
-| `global` | none | everything gets 0.6% faster and more accurate per session regardless of what was practised |
-| `memoriser` | none | each *word* gets faster the more it is typed; nothing transfers between words |
+| `global` | none | everything gets 0.6% faster and more accurate per session regardless of what was practiced |
+| `memorizer` | none | each *word* gets faster the more it is typed; nothing transfers between words |
 
 `global` is the null learner. It has no practice-dependent improvement, so
 any estimate of learning gain must read about zero on it or the estimator is
@@ -61,7 +61,7 @@ biased.
 | --- | --- |
 | **reference loss** | The learner's expected seconds and errors per slot over the fixed reference sample, from its true parameters with no noise, before and after the run. The ground-truth outcome. |
 | **weakness** | For learners with one: exposures typed, share of the shortfall remaining, sessions targeted, when it was first targeted. |
-| **transfer** | How the patterns the scheduler invested in (practised in 3+ sessions) were typed in words never used for targeted practice, early versus late, beside the other slots of the same words. The difference is the pattern-specific speed-up. |
+| **transfer** | How the patterns the scheduler invested in (practiced in 3+ sessions) were typed in words never used for targeted practice, early versus late, beside the other slots of the same words. The difference is the pattern-specific speed-up. |
 | **doses** | Planned against achieved exposures per target. |
 | **pipeline time** | The end-of-session steps against their 100 ms budget. |
 | **plateaus** | Which targets were backed off, and when. |
@@ -77,10 +77,10 @@ The gain check reports three figures side by side:
 1. **Naive**: before-and-after over targets. Biased upward.
 2. **Drift**: the same over every eligible pattern. Should sit near zero,
    since weakness is measured against the moving user baseline.
-3. **Randomised**: the targeted arm against the deferred arm, on fresh
+3. **Randomized**: the targeted arm against the deferred arm, on fresh
    observations after selection, with a standard error.
 
-The randomised comparison works because deferral is a coin toss over the
+The randomized comparison works because deferral is a coin toss over the
 same candidate pool: the two arms are random halves of one population, so
 they have the same prior weakness by construction. Matching each deferred
 candidate to the target with the nearest prior estimate was tried first and
@@ -110,7 +110,7 @@ estimate at the start of the practice window.
 
 **The naive gain estimate is biased upward on every learner**, by about +0.05
 to +0.17 in weakness units depending on run length, learning or not. Drift
-stays near zero. The randomised comparison reads within its standard error of
+stays near zero. The randomized comparison reads within its standard error of
 zero on the null learner, but that standard error is wide: about 0.15 after
 150 daily sessions. Deferring a quarter of candidates for three sessions
 yields roughly 300 deferred selections with about six incidental exposures
@@ -120,8 +120,8 @@ log-latency); the error component would need an order of magnitude more
 controls. That is a quantitative input to any future scheduler that wants to
 act on measured gain.
 
-**The memoriser is not credited** with pattern improvement by the transfer
-view: its practised patterns speed up no more than the other slots of the
+**The memorizer is not credited** with pattern improvement by the transfer
+view: its practiced patterns speed up no more than the other slots of the
 same untargeted words, whatever it gained on the words it was drilled on.
 
 ## Tunable sweeps

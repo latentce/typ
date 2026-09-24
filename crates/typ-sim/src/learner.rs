@@ -25,20 +25,20 @@ pub enum Kind {
     /// power law. The learner the scheduler is meant to help.
     Trainable,
     /// One bigram is much slower and more error-prone than the rest and
-    /// stays so however much it is practised.
+    /// stays so however much it is practiced.
     Awkward,
     /// Nothing improves. Every third session is a tired one, the first
     /// words of every session are slow while the learner warms up, and the
     /// last ones slow down again.
     Fatigue,
     /// Everything gets uniformly faster and more accurate with every
-    /// session, whatever was practised. The learner with no
+    /// session, whatever was practiced. The learner with no
     /// practice-dependent improvement, against which a gain estimate must
     /// read zero.
     Global,
     /// Each word gets faster the more often it has been typed, and nothing
     /// carries over to other words containing the same patterns.
-    Memoriser,
+    Memorizer,
 }
 
 impl Kind {
@@ -47,7 +47,7 @@ impl Kind {
         Kind::Awkward,
         Kind::Fatigue,
         Kind::Global,
-        Kind::Memoriser,
+        Kind::Memorizer,
     ];
 
     pub fn name(self) -> &'static str {
@@ -56,7 +56,7 @@ impl Kind {
             Kind::Awkward => "awkward",
             Kind::Fatigue => "fatigue",
             Kind::Global => "global",
-            Kind::Memoriser => "memoriser",
+            Kind::Memorizer => "memorizer",
         }
     }
 
@@ -103,7 +103,7 @@ const FATIGUE_PER_WORD: f64 = 0.003;
 /// log error probability.
 const GLOBAL_RATE: f64 = 0.006;
 
-/// The memoriser: how much log-latency a fully familiar word saves, and
+/// The memorizer: how much log-latency a fully familiar word saves, and
 /// the number of typings at which half of that is reached. Errors on a
 /// familiar word fall by half as much, proportionally.
 const FAMILIARITY: f64 = 0.40;
@@ -163,7 +163,7 @@ pub struct Learner {
     skill: Skill,
     /// Exposures of the weak bigram so far.
     practice: u32,
-    /// How often each word has been typed, for the memoriser.
+    /// How often each word has been typed, for the memorizer.
     words_typed: BTreeMap<Box<str>, u32>,
     /// Sessions typed so far.
     sessions: usize,
@@ -233,7 +233,7 @@ impl Learner {
     /// Types the prompt from start to finish as one session: an event log
     /// with realistic timestamps, applied through the same state machine
     /// the terminal feeds. Whatever the learner learns from typing it has
-    /// been learnt by the time this returns.
+    /// been learned by the time this returns.
     pub fn type_prompt(&mut self, prompt: &Prompt) -> SessionState {
         let mut state = SessionState::new(
             prompt.clone(),
@@ -304,7 +304,7 @@ impl Learner {
                 }
                 previous = expected;
             }
-            if self.kind == Kind::Memoriser {
+            if self.kind == Kind::Memorizer {
                 *self.words_typed.entry(word.clone()).or_default() += 1;
             }
         }
@@ -373,7 +373,7 @@ impl Learner {
                 }
             }
             Kind::Global => log -= GLOBAL_RATE * self.sessions as f64,
-            Kind::Memoriser => log -= FAMILIARITY * self.familiarity(context.word),
+            Kind::Memorizer => log -= FAMILIARITY * self.familiarity(context.word),
         }
         log
     }
@@ -396,7 +396,7 @@ impl Learner {
             }
             Kind::Fatigue => {}
             Kind::Global => probability *= (-GLOBAL_RATE * self.sessions as f64).exp(),
-            Kind::Memoriser => probability *= 1.0 - 0.5 * self.familiarity(context.word),
+            Kind::Memorizer => probability *= 1.0 - 0.5 * self.familiarity(context.word),
         }
         probability.min(1.0)
     }
@@ -406,7 +406,7 @@ impl Learner {
         (1.0 + f64::from(self.practice) / PRACTICE_SCALE).powf(-PRACTICE_EXPONENT)
     }
 
-    /// How familiar the memoriser is with a word, from zero to one.
+    /// How familiar the memorizer is with a word, from zero to one.
     fn familiarity(&self, word: &str) -> f64 {
         let typed = self.words_typed.get(word).copied().unwrap_or(0);
         1.0 - 1.0 / (1.0 + f64::from(typed) / FAMILIARITY_SCALE)

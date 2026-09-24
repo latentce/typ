@@ -91,7 +91,7 @@ impl PatternStats {
     }
 
     /// The sums as they stand at `at`: every observation weighted by
-    /// `exp(−ln 2 · Δt / half_life)`. Time never runs backwards here: an
+    /// `exp(−ln 2 · Δt / half_life)`. Time never runs backward here: an
     /// earlier `at` leaves the sums as they are.
     pub fn decayed_to(mut self, at: i64, half_life_days: f64) -> PatternStats {
         if at > self.last_update {
@@ -455,7 +455,7 @@ impl ModelState {
             residuals.sort_by(f64::total_cmp);
             let n = residuals.len() as f64;
             median(&residuals, |a, b| (a + b) / 2.0).unwrap_or(0.0) * n
-                / (n + config.offset_regulariser)
+                / (n + config.offset_regularizer)
         });
         let difficulty = match baseline {
             Some(baseline) if completed && !clean.is_empty() => {

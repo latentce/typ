@@ -36,7 +36,7 @@ The steps use `just run`, which runs the debug binary.
 5. **Complete.** Type the prompt to the end. On the final character (or a
    space after the final word) a line with gross WPM, raw accuracy, final
    accuracy, and consistency appears below the prompt, then a `next:` line
-   naming the patterns the next prompt will practise (`next: none yet` only
+   naming the patterns the next prompt will practice (`next: none yet` only
    if no session has completed yet, since the first prompt is a baseline),
    and the shell prompt returns. The whole prompt and the results stay in
    scrollback. Run `just run` again: a few words of the new prompt contain
@@ -46,10 +46,10 @@ The steps use `just run`, which runs the debug binary.
 7. **`Esc`.** Same as the previous step with `Esc`.
 8. **Induced panic.** `TYP_PANIC_AFTER=3 just run`, then type three
    characters. The panic message prints below the prompt on a restored
-   terminal and the shell is usable. (The variable is honoured only by debug
+   terminal and the shell is usable. (The variable is honored only by debug
    builds.)
 9. **`NO_COLOR`.** `NO_COLOR=1 just run`. Untyped text is dim, mistakes are
-   bold and underlined, nothing is coloured.
+   bold and underlined, nothing is colored.
 10. **Narrow terminal.** Make the terminal narrower than 20 columns and run
     `just run`. It refuses with a one-line message and exits without touching
     the terminal.

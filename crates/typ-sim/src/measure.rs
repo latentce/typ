@@ -48,7 +48,7 @@ impl Estimate {
 /// weakness is measured against the user baseline, which moves with any
 /// global change.
 ///
-/// The corrected figure is a randomised comparison instead. Every
+/// The corrected figure is a randomized comparison instead. Every
 /// candidate was deferred or not by a coin toss, so the newly deferred
 /// candidates of a session and its targets differ only by that toss; the
 /// two arms are compared on fresh observations alone: what the learner
@@ -149,7 +149,7 @@ impl Arm {
 
     /// The variance of the score from the spread of the per-selection
     /// outcomes, selections of one pattern taken together, the log error
-    /// rate linearised at the rate.
+    /// rate linearized at the rate.
     fn score_variance(&self, config: &SchedulerConfig) -> Option<f64> {
         let residual = variance_of_mean(&self.residuals)?;
         let rate = self.prior_shrunk_error_rate(config)?;
@@ -367,30 +367,30 @@ impl EarlyLate {
     }
 }
 
-/// Transfer: how the patterns the scheduler invested in (practised in at
+/// Transfer: how the patterns the scheduler invested in (practiced in at
 /// least [`TRANSFER_MIN_SESSIONS`] sessions) were typed in words never
 /// used for targeted practice, early in the run against late, beside every
 /// other slot of the same words over the same sessions. The difference
-/// between the two speed-ups is the improvement specific to the practised
-/// patterns; a learner that only memorises the words it is drilled on, or
+/// between the two speed-ups is the improvement specific to the practiced
+/// patterns; a learner that only memorizes the words it is drilled on, or
 /// that gets faster across the board, shows none.
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct Transfer {
     /// Slots whose pattern chain includes an invested-in pattern.
-    pub practised: EarlyLate,
+    pub practiced: EarlyLate,
     /// Every other slot of the same words.
     pub other: EarlyLate,
 }
 
 impl Transfer {
-    /// The practised slots' speed-up less the other slots'.
+    /// The practiced slots' speed-up less the other slots'.
     pub fn difference(&self) -> Option<f64> {
-        Some(self.practised.speed_up()? - self.other.speed_up()?)
+        Some(self.practiced.speed_up()? - self.other.speed_up()?)
     }
 
-    fn sample(&mut self, practised: bool, early: bool) -> &mut SlotSample {
-        let side = if practised {
-            &mut self.practised
+    fn sample(&mut self, practiced: bool, early: bool) -> &mut SlotSample {
+        let side = if practiced {
+            &mut self.practiced
         } else {
             &mut self.other
         };
@@ -402,18 +402,18 @@ impl Transfer {
     }
 }
 
-/// A pattern counts as invested in once practised in this many sessions;
+/// A pattern counts as invested in once practiced in this many sessions;
 /// one selected once or twice on a noisy draw says little about transfer.
 pub const TRANSFER_MIN_SESSIONS: usize = 3;
 
 /// The transfer over the sessions from the second on (the first has no
 /// targets), the earlier half against the later.
 pub fn transfer(run: &Run) -> Transfer {
-    let mut sessions_practised: BTreeMap<&str, usize> = BTreeMap::new();
-    for e in run.sessions.iter().flat_map(|s| s.practised()) {
-        *sessions_practised.entry(&e.target.pattern).or_default() += 1;
+    let mut sessions_practiced: BTreeMap<&str, usize> = BTreeMap::new();
+    for e in run.sessions.iter().flat_map(|s| s.practiced()) {
+        *sessions_practiced.entry(&e.target.pattern).or_default() += 1;
     }
-    let practised: BTreeSet<&str> = sessions_practised
+    let practiced: BTreeSet<&str> = sessions_practiced
         .into_iter()
         .filter(|&(_, n)| n >= TRANSFER_MIN_SESSIONS)
         .map(|(p, _)| p)
@@ -423,7 +423,7 @@ pub fn transfer(run: &Run) -> Transfer {
         .iter()
         .flat_map(|s| s.composed.targeted_words())
         .collect();
-    let is_practised = |chain: &str| practised.iter().any(|p| chain.ends_with(p));
+    let is_practiced = |chain: &str| practiced.iter().any(|p| chain.ends_with(p));
 
     let mut transfer = Transfer::default();
     let considered = &run.sessions[1.min(run.sessions.len())..];
@@ -445,7 +445,7 @@ pub fn transfer(run: &Run) -> Transfer {
                     word: index,
                     position,
                 });
-                let sample = transfer.sample(is_practised(&chain), early);
+                let sample = transfer.sample(is_practiced(&chain), early);
                 sample.slots += 1;
                 sample.errors += error_mass.get(&position).copied().unwrap_or(0.0).min(1.0);
             }
@@ -456,7 +456,7 @@ pub fn transfer(run: &Run) -> Transfer {
             }
             if let Some(latency) = interval.latency_micros {
                 transfer
-                    .sample(is_practised(&interval.pattern), early)
+                    .sample(is_practiced(&interval.pattern), early)
                     .clean_latencies_micros
                     .push(latency);
             }

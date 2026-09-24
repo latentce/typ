@@ -13,7 +13,7 @@ use typ_sim::schedule::Scheduler;
 #[command(name = "typ-sim", version, about)]
 struct Cli {
     /// Which synthetic learner types: trainable, awkward, fatigue, global,
-    /// or memoriser.
+    /// or memorizer.
     #[arg(long, default_value = "trainable", value_parser = parse_learner)]
     learner: Kind,
     /// Which scheduler composes the prompts: random, weakest, or phase1.

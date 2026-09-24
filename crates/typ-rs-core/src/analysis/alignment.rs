@@ -4,7 +4,7 @@
 //! The alignment is Damerau-Levenshtein with adjacent transpositions
 //! (optimal string alignment). Where several alignments need the fewest
 //! operations, the one whose errors fall latest in the word wins, comparing
-//! the error slots from the last backwards; alignments still tied share
+//! the error slots from the last backward; alignments still tied share
 //! their errors equally.
 
 use std::collections::HashMap;

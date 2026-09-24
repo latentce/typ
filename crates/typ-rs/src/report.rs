@@ -45,7 +45,7 @@ pub struct Ending<'a> {
 /// The block printed when a session ends. For a completed session: its
 /// figures, then the speed it translates to on standard text with its
 /// change against the recent sessions (or `baseline recorded` when there
-/// are none), then the patterns the next prompt will practise. Speed and
+/// are none), then the patterns the next prompt will practice. Speed and
 /// accuracy are reported only for a completed session, since a partial
 /// prompt has no meaningful WPM: an interrupted session says how far it
 /// got and whether its observations were kept.
@@ -136,7 +136,7 @@ fn next_line(next: &ComposedPrompt) -> String {
 
 /// One line per completed session, most recent first: gross WPM, the speed
 /// on standard text, raw accuracy, and consistency, from the session's
-/// cached summary. A session without one (not yet applied) is analysed on
+/// cached summary. A session without one (not yet applied) is analyzed on
 /// the spot and shows no speed on standard text.
 pub fn session_listing(sessions: &[StoredSession]) -> String {
     if sessions.is_empty() {
@@ -166,7 +166,7 @@ pub fn session_listing(sessions: &[StoredSession]) -> String {
         .collect()
 }
 
-/// Each session replayed and analysed, in the order given.
+/// Each session replayed and analyzed, in the order given.
 pub fn analyses(sessions: &[StoredSession]) -> Vec<SessionAnalysis> {
     sessions.iter().map(|s| analyze(&s.replay())).collect()
 }
@@ -252,10 +252,10 @@ pub fn word_initiation_line(performances: &[Vec<WordPerformance>]) -> String {
     )
 }
 
-/// For every pattern practised in the last `contamination_sessions`
+/// For every pattern practiced in the last `contamination_sessions`
 /// sessions: its median clean latency and raw accuracy in the words used
 /// for targeted practice over that span against those in words that were
-/// not, over the sessions given. Empty without a practised pattern.
+/// not, over the sessions given. Empty without a practiced pattern.
 pub fn transfer_section(
     sessions: &[StoredSession],
     analyses: &[SessionAnalysis],
@@ -263,7 +263,7 @@ pub fn transfer_section(
     config: &SchedulerConfig,
 ) -> String {
     let span = config.contamination_sessions;
-    let patterns: BTreeSet<&str> = history.recently_practised(span).collect();
+    let patterns: BTreeSet<&str> = history.recently_practiced(span).collect();
     if patterns.is_empty() {
         return String::new();
     }

@@ -43,16 +43,16 @@ fn phase1_beats_random_on_reference_loss_for_the_trainable_learner() {
 }
 
 #[test]
-fn the_memoriser_is_not_credited_with_pattern_improvement() {
-    let run = run(Kind::Memoriser, Scheduler::Phase1, 60, 1);
+fn the_memorizer_is_not_credited_with_pattern_improvement() {
+    let run = run(Kind::Memorizer, Scheduler::Phase1, 60, 1);
     let transfer = transfer(&run);
     let difference = transfer.difference().expect("both windows have slots");
     assert!(
         difference < 0.05,
-        "practised patterns sped up beyond other slots by {difference:+.3}\n{}",
+        "practiced patterns sped up beyond other slots by {difference:+.3}\n{}",
         report(&run)
     );
-    assert!(transfer.practised.early.slots >= 100 && transfer.practised.late.slots >= 100);
+    assert!(transfer.practiced.early.slots >= 100 && transfer.practiced.late.slots >= 100);
 }
 
 #[test]
@@ -80,8 +80,8 @@ fn the_permanently_awkward_transition_triggers_plateau() {
     assert_eq!(run.learner.weakness_remaining(), Some(1.0));
 }
 
-/// The budget is asserted for an optimised build, the one a user runs;
-/// an unoptimised test build is allowed ten times as long so that a gross
+/// The budget is asserted for an optimized build, the one a user runs;
+/// an unoptimized test build is allowed ten times as long so that a gross
 /// regression still shows there.
 #[test]
 fn the_end_of_session_pipeline_stays_within_its_budget_at_50_words() {
@@ -105,9 +105,9 @@ fn the_end_of_session_pipeline_stays_within_its_budget_at_50_words() {
     );
 }
 
-/// The learner that gets faster with every session whatever it practises.
+/// The learner that gets faster with every session whatever it practices.
 /// A naive before-and-after estimate credits its targets with gain that
-/// is regression to the mean; the randomised comparison against deferred
+/// is regression to the mean; the randomized comparison against deferred
 /// controls must not.
 #[test]
 fn the_null_learner_check_passes() {

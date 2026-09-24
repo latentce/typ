@@ -13,7 +13,7 @@
 
 use super::{ModelState, ROOT, SchedulerConfig};
 
-/// A pattern's weakness posterior, summarised by its mean and standard
+/// A pattern's weakness posterior, summarized by its mean and standard
 /// deviation.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Weakness {
@@ -122,8 +122,8 @@ impl ModelState {
 
 /// The delta-method variance of `ln(p / reference)` for a Beta posterior
 /// with mean `p` over `trials` trials: the Beta variance `p(1 − p) /
-/// (trials + 1)` divided by the square of the rate the log is linearised
-/// at. That rate is the larger of `p` and the reference: linearising at a
+/// (trials + 1)` divided by the square of the rate the log is linearized
+/// at. That rate is the larger of `p` and the reference: linearizing at a
 /// `p` driven toward zero by error-free trials would make the best-typed
 /// patterns the most uncertain, and ever more so with each clean trial,
 /// whereas the question the excess answers is how far the pattern sits

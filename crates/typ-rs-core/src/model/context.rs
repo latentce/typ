@@ -155,8 +155,8 @@ impl Coefficients {
     /// Weighted ridge regression of residual on features. The model has an
     /// intercept, so a shift common to every bigram (the mean residual) is
     /// absorbed there rather than forced onto the features; it is not
-    /// penalised: features and residuals are centred at their weighted
-    /// means, the weights are solved from the centred normal equations with
+    /// penalized: features and residuals are centered at their weighted
+    /// means, the weights are solved from the centered normal equations with
     /// `lambda` added to the diagonal, and the intercept is what makes the
     /// weighted mean residual come out exactly. `None` when the rows carry
     /// no weight at all.
@@ -182,13 +182,13 @@ impl Coefficients {
         let mut normal = [[0.0; FEATURE_COUNT]; FEATURE_COUNT];
         let mut moment = [0.0; FEATURE_COUNT];
         for a in &rows {
-            let centred: Features = std::array::from_fn(|i| a.features[i] - mean_features[i]);
+            let centered: Features = std::array::from_fn(|i| a.features[i] - mean_features[i]);
             let residual = a.residual - mean_residual;
             for i in 0..FEATURE_COUNT {
                 for j in 0..FEATURE_COUNT {
-                    normal[i][j] += a.weight * centred[i] * centred[j];
+                    normal[i][j] += a.weight * centered[i] * centered[j];
                 }
-                moment[i] += a.weight * centred[i] * residual;
+                moment[i] += a.weight * centered[i] * residual;
             }
         }
         for (i, row) in normal.iter_mut().enumerate() {
@@ -207,7 +207,7 @@ impl Coefficients {
 }
 
 /// Solves `a x = b` by Gaussian elimination with partial pivoting. The
-/// matrix is a ridge-regularised normal matrix, so it is positive definite
+/// matrix is a ridge-regularized normal matrix, so it is positive definite
 /// and never singular; a pivot that is nonetheless zero (only possible with
 /// a zero ridge and degenerate rows) contributes a zero coordinate.
 fn solve(mut a: [[f64; FEATURE_COUNT]; FEATURE_COUNT], mut b: Features) -> Features {

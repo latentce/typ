@@ -101,8 +101,8 @@ fn transfer_lines(transfer: &Transfer) -> String {
     let mut out = String::new();
     let _ = writeln!(
         out,
-        "transfer         practised patterns in untargeted words: {}",
-        window_text(&transfer.practised)
+        "transfer         practiced patterns in untargeted words: {}",
+        window_text(&transfer.practiced)
     );
     let _ = writeln!(
         out,

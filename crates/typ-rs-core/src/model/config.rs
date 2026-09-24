@@ -28,8 +28,8 @@ pub struct SchedulerConfig {
     /// before there is evidence.
     pub latency_variance_prior: f64,
     /// Clean intervals' worth of pull toward zero on the session offset: the
-    /// offset is the median residual scaled by `n / (n + regulariser)`.
-    pub offset_regulariser: f64,
+    /// offset is the median residual scaled by `n / (n + regularizer)`.
+    pub offset_regularizer: f64,
     /// An interrupted session's observations count only with at least this
     /// many clean intervals.
     pub interrupted_min_clean_intervals: usize,
@@ -72,7 +72,7 @@ pub struct SchedulerConfig {
     pub deferral_window: usize,
     /// Exposures a target should receive in a session.
     pub dose: usize,
-    /// A target is plateaued once practised in at least this many sessions
+    /// A target is plateaued once practiced in at least this many sessions
     /// with more than this cumulative achieved dose and no change in its
     /// weakness beyond its uncertainty; its priority is then scaled by the
     /// plateau factor, recovering to one over this many untargeted sessions.
@@ -87,7 +87,7 @@ pub struct SchedulerConfig {
     pub ramp_full_share: f64,
     pub ramp_sessions: usize,
     /// The candidate pool for targeted words is every word containing a
-    /// practised pattern plus this many words drawn from the reference
+    /// practiced pattern plus this many words drawn from the reference
     /// distribution.
     pub pool_sample: usize,
     /// What one fresh exposure of the highest-priority target adds to a
@@ -131,7 +131,7 @@ impl Default for SchedulerConfig {
             root_prior_errors: 1.0,
             root_prior_correct: 19.0,
             latency_variance_prior: 0.1,
-            offset_regulariser: 20.0,
+            offset_regularizer: 20.0,
             interrupted_min_clean_intervals: 20,
             context_refit_sessions: 5,
             context_ridge_lambda: 1.0,
@@ -221,9 +221,9 @@ const TUNABLES: &[Tunable] = &[
         whole_number: false,
     },
     Tunable {
-        name: "offset_regulariser",
-        get: |c| c.offset_regulariser,
-        set: |c, v| c.offset_regulariser = v,
+        name: "offset_regularizer",
+        get: |c| c.offset_regularizer,
+        set: |c, v| c.offset_regularizer = v,
         whole_number: false,
     },
     Tunable {

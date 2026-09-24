@@ -106,7 +106,7 @@ impl Store {
     /// Binds the profile to a layout. Setting the layout it already has is
     /// always allowed; changing it is allowed only while no session has been
     /// typed on the profile, since its statistics describe typing on one
-    /// keyboard. Another layout afterwards means another profile.
+    /// keyboard. Another layout afterward means another profile.
     pub fn set_layout(&mut self, profile: &Profile, layout: &str) -> Result<()> {
         if layout == profile.layout {
             return Ok(());

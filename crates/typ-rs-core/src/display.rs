@@ -15,7 +15,7 @@ pub struct Viewport {
     pub rows: usize,
 }
 
-/// How a cell should look, before colours are chosen.
+/// How a cell should look, before colors are chosen.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum CellClass {
     /// Not yet typed; also the separator space before its word is submitted.
@@ -211,13 +211,13 @@ fn displayable(c: char) -> char {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Palette {
     Color,
-    /// Colour is disabled: incorrect text is bold and underlined, untyped
+    /// Color is disabled: incorrect text is bold and underlined, untyped
     /// text is dim.
     NoColor,
 }
 
 impl Palette {
-    /// Follows the `NO_COLOR` convention: colour is disabled when the
+    /// Follows the `NO_COLOR` convention: color is disabled when the
     /// variable is present with a non-empty value.
     pub fn from_no_color(value: Option<&str>) -> Palette {
         match value {
@@ -227,7 +227,7 @@ impl Palette {
     }
 }
 
-/// A cell's text colour; `Default` is the terminal's own foreground.
+/// A cell's text color; `Default` is the terminal's own foreground.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Foreground {
     #[default]
