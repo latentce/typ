@@ -185,24 +185,45 @@ fn type_session(
 
 /// Every row of the given tables, rendered as text, keyed by table.
 fn dump_tables(path: &Path, tables: &[&'static str]) -> BTreeMap<&'static str, Vec<String>> {
+    dump_tables_hiding(path, tables, &[])
+}
+
+/// Every row of the given tables, rendered as text and sorted, keyed by
+/// table, with the listed `(table, column)` pairs left out.
+fn dump_tables_hiding(
+    path: &Path,
+    tables: &[&'static str],
+    hidden: &[(&str, &str)],
+) -> BTreeMap<&'static str, Vec<String>> {
     let conn = Connection::open(path).unwrap();
     tables
         .iter()
         .map(|table| {
-            let mut stmt = conn
-                .prepare(&format!("SELECT * FROM {table} ORDER BY 1, 2"))
+            let columns: Vec<String> = conn
+                .prepare(&format!("PRAGMA table_info({table})"))
+                .unwrap()
+                .query_map([], |r| r.get::<_, String>(1))
+                .unwrap()
+                .collect::<Result<_, _>>()
                 .unwrap();
-            let columns = stmt.column_count();
-            let rows = stmt
+            let shown: Vec<&str> = columns
+                .iter()
+                .map(String::as_str)
+                .filter(|c| !hidden.contains(&(table, c)))
+                .collect();
+            let mut rows = conn
+                .prepare(&format!("SELECT {} FROM {table}", shown.join(", ")))
+                .unwrap()
                 .query_map([], |row| {
-                    (0..columns)
+                    (0..shown.len())
                         .map(|i| row.get_ref(i).map(|v| format!("{v:?}")))
                         .collect::<Result<Vec<_>, _>>()
                         .map(|cells| cells.join("|"))
                 })
                 .unwrap()
-                .collect::<Result<Vec<_>, _>>()
+                .collect::<Result<Vec<String>, _>>()
                 .unwrap();
+            rows.sort();
             (*table, rows)
         })
         .collect()
@@ -800,6 +821,219 @@ fn source_of_truth_rows_are_never_modified_after_a_session_ends() {
         }
     }
     assert_eq!(after["sessions"].len(), 3);
+}
+
+// --- Restarting and discarding attempts ---------------------------------------
+
+/// Every row of every source-of-truth table and every cache, with the
+/// columns that hold a prompt's id or the wall-clock moment the profile was
+/// created left out, so that two databases that recorded the same session
+/// compare equal however their prompt ids were handed out.
+fn dump_comparable(path: &Path) -> BTreeMap<&'static str, Vec<String>> {
+    let tables: Vec<&'static str> = SOURCE_OF_TRUTH
+        .iter()
+        .chain(CACHES)
+        .chain(&["next_prompt"])
+        .copied()
+        .collect();
+    dump_tables_hiding(
+        path,
+        &tables,
+        &[
+            ("profiles", "created_at"),
+            ("prompts", "id"),
+            ("prompt_words", "prompt_id"),
+            ("prompt_targets", "prompt_id"),
+            ("sessions", "prompt_id"),
+            ("next_prompt", "prompt_id"),
+        ],
+    )
+}
+
+#[test]
+fn a_restarted_session_finishes_exactly_as_one_started_on_the_final_prompt() {
+    let (_direct_dir, direct) = temp_db();
+    {
+        let (mut store, profile) = open(&direct);
+        type_session(&mut store, &profile, 1_030, "fox owl", "fox owl", "next");
+    }
+
+    let (_dir, path) = temp_db();
+    let (mut store, profile) = open(&path);
+    let (id, first) = start(&mut store, &profile, 1_000, "cat dog");
+    assert_eq!(first, prompt("cat dog"));
+    let restarted = store
+        .restart_session(id, &probes("fox owl"), 1_030)
+        .unwrap();
+    assert_eq!(restarted.id, id);
+    assert_eq!(restarted.prompt, prompt("fox owl"));
+    let state = typed(restarted.prompt, "fox owl");
+    finish(&mut store, &profile, id, 1_030, &state, "next").unwrap();
+
+    assert_eq!(dump_comparable(&path), dump_comparable(&direct));
+    let session = store.session(id).unwrap();
+    assert_eq!(session.started_at, 1_030);
+    assert_eq!(session.prompt, prompt("fox owl"));
+    let discarded_words: i64 = sql_one(
+        &path,
+        "SELECT count(*) FROM prompt_words WHERE word IN ('cat', 'dog')",
+    );
+    assert_eq!(discarded_words, 0);
+    let prompts: i64 = sql_one(&path, "SELECT count(*) FROM prompts");
+    assert_eq!(prompts, 2, "the final prompt and the one composed ahead");
+}
+
+#[test]
+fn restarting_twice_leaves_one_prompt_and_one_session_with_the_targets_of_the_last() {
+    let (_dir, path) = temp_db();
+    let (mut store, profile) = open(&path);
+    let (id, _) = start(&mut store, &profile, 1_000, "cat dog fox");
+    store
+        .restart_session(id, &probes("owl elk ant"), 1_010)
+        .unwrap();
+    let last = store
+        .restart_session(id, &targeted("bat dog the"), 1_020)
+        .unwrap();
+    assert_eq!(last.id, id);
+    assert_eq!(last.targets, targeted("bat dog the").targets);
+    assert_eq!(last.words, targeted("bat dog the").words);
+    assert_eq!(last.targeted_words, vec![Box::from("bat")]);
+
+    let prompts: i64 = sql_one(&path, "SELECT count(*) FROM prompts");
+    let sessions: i64 = sql_one(&path, "SELECT count(*) FROM sessions");
+    let targets: i64 = sql_one(&path, "SELECT count(*) FROM prompt_targets");
+    assert_eq!((prompts, sessions, targets), (1, 1, 3));
+    let session = store.session(id).unwrap();
+    assert_eq!(session.prompt, prompt("bat dog the"));
+    assert_eq!(session.targets, last.targets);
+    assert_eq!(session.started_at, 1_020);
+    assert_eq!(session.ended_at, None);
+}
+
+#[test]
+fn a_session_that_has_ended_cannot_be_restarted() {
+    let (_dir, path) = temp_db();
+    let (mut store, profile) = open(&path);
+    let (id, _) = type_session(&mut store, &profile, 1_000, "cat", "cat", "next");
+    let before = dump(&path);
+
+    let refused = store.restart_session(id, &probes("dog"), 2_000);
+    assert!(matches!(refused, Err(Error::SessionAlreadyEnded(ended)) if ended == id));
+    assert_eq!(dump(&path), before);
+    let missing = SessionId::from_str("99").unwrap();
+    assert!(matches!(
+        store.restart_session(missing, &probes("dog"), 2_000),
+        Err(Error::NoSuchSession(_))
+    ));
+}
+
+#[test]
+fn a_discarded_attempt_leaves_sessions_as_before_and_its_prompt_waiting_for_the_same_length() {
+    let (_dir, path) = temp_db();
+    let (mut store, profile) = open(&path);
+    type_session(&mut store, &profile, 1_000, "cat", "cat", "one two three");
+    let before = dump(&path);
+    let history_before = store.training_history(&profile).unwrap();
+
+    let (id, shown) = start_with(&mut store, &profile, 2_000, 3, "unused unused unused");
+    assert_eq!(shown, prompt("one two three"));
+    store.discard_session(id).unwrap();
+
+    let after = dump(&path);
+    assert_eq!(after["sessions"], before["sessions"]);
+    assert_eq!(after["prompts"], before["prompts"]);
+    assert_eq!(store.training_history(&profile).unwrap(), history_before);
+    let (words, corpus, model, layout): (i64, i64, i64, String) = Connection::open(&path)
+        .unwrap()
+        .query_row(
+            "SELECT word_count, corpus_version, model_version, layout FROM next_prompt",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+        )
+        .unwrap();
+    assert_eq!(
+        (words, corpus, model, layout),
+        (
+            3,
+            i64::from(CORPUS_VERSION),
+            i64::from(MODEL_VERSION),
+            "qwerty".to_string()
+        )
+    );
+
+    let (id, shown) = start_with(&mut store, &profile, 3_000, 2, "two words");
+    assert_eq!(shown, prompt("two words"));
+    store.discard_session(id).unwrap();
+    let (_, shown) = start_with(&mut store, &profile, 4_000, 2, "other pair");
+    assert_eq!(shown, prompt("two words"));
+}
+
+#[test]
+fn discarding_after_a_restart_puts_the_restarted_prompt_back_and_forgets_the_first() {
+    let (_dir, path) = temp_db();
+    let (mut store, profile) = open(&path);
+    let (id, _) = start(&mut store, &profile, 1_000, "cat dog");
+    store
+        .restart_session(id, &probes("fox owl"), 1_010)
+        .unwrap();
+    store.discard_session(id).unwrap();
+
+    let sessions: i64 = sql_one(&path, "SELECT count(*) FROM sessions");
+    let prompts: i64 = sql_one(&path, "SELECT count(*) FROM prompts");
+    assert_eq!((sessions, prompts), (0, 1));
+    let (_, shown) = start(&mut store, &profile, 2_000, "unused unused");
+    assert_eq!(shown, prompt("fox owl"));
+}
+
+#[test]
+fn a_session_with_events_or_one_that_has_ended_cannot_be_discarded() {
+    let (_dir, path) = temp_db();
+    let (mut store, profile) = open(&path);
+    let (ended, _) = type_session(&mut store, &profile, 1_000, "cat", "cat", "dog");
+    let refused = store.discard_session(ended);
+    assert!(matches!(refused, Err(Error::SessionAlreadyEnded(id)) if id == ended));
+
+    let (typed_id, _) = start(&mut store, &profile, 2_000, "unused");
+    sql(
+        &path,
+        &format!(
+            "INSERT INTO input_events
+                 (session_id, seq, at_micros, kind, expected, actual, word_index, position,
+                  first_of_session, after_resize, in_paste, burst, long_pause)
+             VALUES ({typed_id}, 0, 100, 'char', 'd', 'd', 0, 0, 1, 0, 0, 0, 0)"
+        ),
+    );
+    let before = dump(&path);
+    let refused = store.discard_session(typed_id);
+    assert!(matches!(refused, Err(Error::SessionTyped(id)) if id == typed_id));
+    assert_eq!(dump(&path), before);
+    let missing = SessionId::from_str("99").unwrap();
+    assert!(matches!(
+        store.discard_session(missing),
+        Err(Error::NoSuchSession(_))
+    ));
+}
+
+#[test]
+fn rebuilding_with_a_restarted_session_present_leaves_the_source_of_truth_alone() {
+    let (_dir, path) = temp_db();
+    {
+        let (mut store, profile) = open(&path);
+        type_history(&mut store, &profile);
+        let (id, _) = start(&mut store, &profile, 5_000_000, "cat dog");
+        let restarted = store
+            .restart_session(id, &targeted("cat dog the"), 5_000_010)
+            .unwrap();
+        let state = typed(restarted.prompt, "cat dog the");
+        finish(&mut store, &profile, id, 5_000_010, &state, "next").unwrap();
+    }
+    let truth_before = dump(&path);
+    let caches_before = dump_tables(&path, CACHES);
+
+    let (mut store, _) = open(&path);
+    assert_eq!(store.rebuild().unwrap(), 5);
+    assert_eq!(dump(&path), truth_before);
+    assert_eq!(dump_tables(&path, CACHES), caches_before);
 }
 
 // --- Pattern statistics ------------------------------------------------------

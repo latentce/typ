@@ -21,6 +21,10 @@ pub enum TerminalEvent {
         columns: u16,
         rows: u16,
     },
+    /// `Shift-Tab`: discard the attempt and begin another on a fresh
+    /// prompt. Never a session key, so the state machine and the event log
+    /// never see it.
+    Restart,
 }
 
 /// A decoded event and when it was read, in microseconds from raw-mode entry.
@@ -52,14 +56,20 @@ pub fn read_batch(now_micros: impl Fn() -> u64) -> io::Result<Vec<StampedEvent>>
 /// Maps a terminal event to what the session should see, or `None` for
 /// events that carry no meaning here (key releases, focus, mouse).
 ///
-/// `Esc` and `Ctrl-C` interrupt. `Ctrl-H` is treated as backspace because
-/// some terminals send it for the Backspace key. Any other character with a
-/// modifier held (control, alt, super) is a command in some other program,
-/// not typed text, and is ignored.
+/// `Esc` and `Ctrl-C` interrupt. `Shift-Tab` restarts: every terminal
+/// delivers it as `BackTab`, whether through the legacy `ESC [ Z` sequence
+/// or the kitty keyboard protocol, so that one code with no modifier but
+/// Shift is the whole key; plain `Tab` and `Enter` stay inert. `Ctrl-H` is
+/// treated as backspace because some terminals send it for the Backspace
+/// key. Any other character with a modifier held (control, alt, super) is
+/// a command in some other program, not typed text, and is ignored.
 pub fn decode(event: Event) -> Option<TerminalEvent> {
     match event {
         Event::Key(key) if key.kind != KeyEventKind::Release => {
             let modifiers = key.modifiers.difference(KeyModifiers::SHIFT);
+            if key.code == KeyCode::BackTab && modifiers.is_empty() {
+                return Some(TerminalEvent::Restart);
+            }
             let key = match key.code {
                 KeyCode::Esc => Key::Interrupt,
                 KeyCode::Char('c') if modifiers == KeyModifiers::CONTROL => Key::Interrupt,
@@ -149,6 +159,43 @@ mod tests {
         assert_eq!(key(press(KeyCode::Tab, KeyModifiers::NONE)), Key::Other);
         assert_eq!(key(press(KeyCode::Left, KeyModifiers::NONE)), Key::Other);
         assert_eq!(key(press(KeyCode::F(1), KeyModifiers::NONE)), Key::Other);
+    }
+
+    #[test]
+    fn shift_tab_restarts_and_no_other_tab_or_enter_does() {
+        assert_eq!(
+            decode(press(KeyCode::BackTab, KeyModifiers::SHIFT)),
+            Some(TerminalEvent::Restart)
+        );
+        assert_eq!(
+            decode(press(KeyCode::BackTab, KeyModifiers::NONE)),
+            Some(TerminalEvent::Restart)
+        );
+        assert_eq!(key(press(KeyCode::Tab, KeyModifiers::NONE)), Key::Other);
+        assert_eq!(key(press(KeyCode::Tab, KeyModifiers::SHIFT)), Key::Other);
+        assert_eq!(key(press(KeyCode::Enter, KeyModifiers::NONE)), Key::Other);
+        assert_eq!(
+            key(press(
+                KeyCode::BackTab,
+                KeyModifiers::SHIFT | KeyModifiers::CONTROL
+            )),
+            Key::Other
+        );
+        assert_eq!(
+            key(press(
+                KeyCode::BackTab,
+                KeyModifiers::SHIFT | KeyModifiers::ALT
+            )),
+            Key::Other
+        );
+    }
+
+    #[test]
+    fn a_tab_inside_a_paste_is_pasted_text_not_a_restart() {
+        assert_eq!(
+            decode(Event::Paste("a\tb".into())),
+            Some(TerminalEvent::Paste("a\tb".into()))
+        );
     }
 
     #[test]

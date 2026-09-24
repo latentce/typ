@@ -6,7 +6,10 @@
 //!
 //! The database is opened once per process. Sessions, prompts, and input
 //! events are the source of truth: a session's row is written before it
-//! starts and its events at the end, and neither is changed afterward.
+//! starts and its events at the end, and neither is changed once it has
+//! ended. While an attempt is in flight its row may still move: a restart
+//! moves it to a fresh prompt and deletes the old one, and an attempt left
+//! untyped is deleted with its prompt put back to wait for the next run.
 //! Everything else is a cache rebuilt from them: the pattern statistics
 //! whenever the model version changes, the next prompt when a session
 //! ends. Nothing here runs while a session is being typed.
@@ -57,6 +60,9 @@ pub enum Error {
     NoSuchSession(SessionId),
     /// The session has already ended; its rows are never changed again.
     SessionAlreadyEnded(SessionId),
+    /// The session has input events stored for it, so it was typed and is
+    /// not a discarded attempt.
+    SessionTyped(SessionId),
     /// A setting was given a value it cannot take, or a change it does not
     /// allow; nothing was changed. The message is complete on its own.
     InvalidSetting(String),
@@ -81,6 +87,7 @@ impl fmt::Display for Error {
             ),
             Error::NoSuchSession(id) => write!(f, "no session {id}"),
             Error::SessionAlreadyEnded(id) => write!(f, "session {id} has already ended"),
+            Error::SessionTyped(id) => write!(f, "session {id} has been typed"),
             Error::InvalidSetting(message) => f.write_str(message),
             Error::Corrupt(what) => write!(f, "corrupt database: {what}"),
         }

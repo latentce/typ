@@ -51,25 +51,38 @@ own history. To start from nothing, `rm -r target/typ-data` first.
 6. **`Ctrl-C`.** `just run`, type a word or two, press `Ctrl-C`. The session
    ends with `interrupted after N words` and the shell is back.
 7. **`Esc`.** Same as the previous step with `Esc`.
-8. **Induced panic.** `TYP_PANIC_AFTER=3 just run`, then type three
-   characters. The panic message prints below the prompt on a restored
-   terminal and the shell is usable. (The variable is honored only by debug
-   builds.)
-9. **`NO_COLOR`.** `NO_COLOR=1 just run`. Untyped text is dim, mistakes are
-   bold and underlined, nothing is colored.
-10. **Cursor.** `just run config cursor-shape block` then `just run`: the
+8. **Restart.** `just run` and, before typing, press `Shift-Tab`: a
+   different prompt is painted where the first one was, with the cursor
+   before its first character and nothing left over above or below. Type
+   half a word with a mistake and press `Shift-Tab` again: the typed
+   characters and their colors are gone with the prompt. Type this prompt
+   to the end: the results print as usual, and `just run stats` lists it
+   once, with no trace of the two prompts that were thrown away.
+9. **`Esc` untyped.** `just run`, note the first few words, and press `Esc`
+   without typing. The line `nothing typed` prints, with no results and no
+   `next:` line, and the shell is back. `just run` again: the same prompt
+   is shown. Press `Shift-Tab`, then `Esc`: `nothing typed` again, and the
+   next `just run` shows the restarted prompt. `just run stats` lists no
+   new session.
+10. **Induced panic.** `TYP_PANIC_AFTER=3 just run`, then type three
+    characters. The panic message prints below the prompt on a restored
+    terminal and the shell is usable. (The variable is honored only by debug
+    builds.)
+11. **`NO_COLOR`.** `NO_COLOR=1 just run`. Untyped text is dim, mistakes are
+    bold and underlined, nothing is colored.
+12. **Cursor.** `just run config cursor-shape block` then `just run`: the
     cursor is a block. `just run config cursor-blink on` then `just run`: it
     blinks. `just run config cursor-shape underline`: an underline. After
     each session ends or is interrupted, the shell's cursor is back to what
     it was before. `just run config cursor-shape beam` and `just run config
     cursor-blink off` restore the defaults. `just run config cursor-shape
     bar` refuses on one line.
-11. **Narrow terminal.** Make the terminal narrower than 20 columns and run
+13. **Narrow terminal.** Make the terminal narrower than 20 columns and run
     `just run`. It refuses with a one-line message and exits without touching
     the terminal.
-12. **Not a terminal.** `just run < /dev/null` refuses with a one-line
+14. **Not a terminal.** `just run < /dev/null` refuses with a one-line
     message.
-13. **Stats during a session.** `just run` in one terminal and, while it is
+15. **Stats during a session.** `just run` in one terminal and, while it is
     waiting for input, `just run stats` in another (from the same
     checkout). The listing shows the sessions completed above, most
     recent first, followed by the slowest, most error-prone, and weakest
@@ -77,17 +90,17 @@ own history. To start from nothing, `rm -r target/typ-data` first.
     held some candidates back, `deferred candidates` with the sessions
     remaining, and neither command disturbs the other. Finish or interrupt
     the session: the next `just run` shows a different prompt.
-14. **Replay.** `just run replay N` with an id from the listing. The first
+16. **Replay.** `just run replay N` with an id from the listing. The first
     lines repeat the results the session printed; below them every word
     shows its first attempt, its own raw accuracy, and the errors attributed
     to patterns, and every
     keystroke its interval class. The corrections you typed in step 2 show
     as `excluded: backspace` / `replacement`, the resize as `after_resize`,
     the paste as `in_paste`, and any long pause as a hesitation.
-15. **Rebuild.** `just run stats > /tmp/before`, then `just run rebuild`
+17. **Rebuild.** `just run stats > /tmp/before`, then `just run rebuild`
     (it reports how many sessions it reapplied) and `just run stats` again:
     the output is identical to `/tmp/before`.
-16. **Settings.** `just run --words 12`: the prompt has 12 words; interrupt
+18. **Settings.** `just run --words 12`: the prompt has 12 words; interrupt
     it. `just run config words 15`, then `just run`: the prompt has 15
     words even though one was composed ahead at 50; interrupt it. `just run
     config words 5` refuses on one line and `just run config words` still

@@ -47,8 +47,9 @@ Correct letters take your normal text color, mistakes show the expected
 letter in red, and anything typed past the end of a word is added in a
 darker red. Space moves to the next word whether or not the word is right;
 a word left wrong is underlined. Backspace fixes mistakes, and steps back
-into the previous word only if that word was left wrong. `Ctrl-C` or `Esc`
-ends early.
+into the previous word only if that word was left wrong. `Shift-Tab` throws
+the prompt away and shows a fresh one in its place, as often as you like.
+`Ctrl-C` or `Esc` ends early.
 
 When you finish, three lines print:
 
@@ -63,7 +64,9 @@ on, part of the prompt targets your weaknesses; that share ramps from 30% to
 80% over your first few sessions.
 
 Interrupted sessions are saved too. They report how many words you got
-through and no speed.
+through and no speed. Nothing is saved, though, if you leave or restart
+before typing anything: a prompt you walk away from is simply shown again
+next time.
 
 ### Settings and profiles
 

@@ -128,6 +128,19 @@ fn contamination_json(c: &Contamination, words: &[ComposedWord], index: usize) -
     )
 }
 
+/// Deletes a prompt with its words and targets. Foreign keys are enforced
+/// and nothing cascades, so the rows go child first; a prompt some session
+/// still refers to is refused by the database.
+pub(crate) fn delete(conn: &Connection, prompt_id: i64) -> Result<()> {
+    conn.execute(
+        "DELETE FROM prompt_targets WHERE prompt_id = ?1",
+        [prompt_id],
+    )?;
+    conn.execute("DELETE FROM prompt_words WHERE prompt_id = ?1", [prompt_id])?;
+    conn.execute("DELETE FROM prompts WHERE id = ?1", [prompt_id])?;
+    Ok(())
+}
+
 pub(crate) fn load(conn: &Connection, prompt_id: i64) -> Result<Prompt> {
     let words: Vec<String> = conn
         .prepare_cached("SELECT word FROM prompt_words WHERE prompt_id = ?1 ORDER BY word_index")?
@@ -244,6 +257,16 @@ pub(crate) struct LoadedPrompt {
 }
 
 impl LoadedPrompt {
+    /// A prompt just inserted under `id` from what composed it.
+    pub(crate) fn composed(id: i64, composed: ComposedPrompt) -> LoadedPrompt {
+        LoadedPrompt {
+            id,
+            prompt: composed.prompt,
+            targets: composed.targets,
+            words: composed.words,
+        }
+    }
+
     /// The words shown as targeted, in prompt order.
     pub(crate) fn targeted_words(&self) -> Vec<Box<str>> {
         self.prompt

@@ -60,6 +60,9 @@ pub struct SessionStart {
 #[derive(Debug, Clone, PartialEq)]
 pub struct StartedSession {
     pub id: SessionId,
+    /// When the attempt on the current prompt began, Unix seconds: the
+    /// start, or the last restart.
+    pub started_at: i64,
     pub prompt: Prompt,
     /// Every pattern selected for the prompt, targets first.
     pub targets: Vec<SelectedTarget>,
@@ -69,6 +72,19 @@ pub struct StartedSession {
     /// The prompt's words shown as targeted, in prompt order; what the
     /// training history records for the session.
     pub targeted_words: Vec<Box<str>>,
+}
+
+impl StartedSession {
+    fn new(id: SessionId, started_at: i64, loaded: LoadedPrompt) -> StartedSession {
+        StartedSession {
+            id,
+            started_at,
+            targeted_words: loaded.targeted_words(),
+            prompt: loaded.prompt,
+            targets: loaded.targets,
+            words: loaded.words,
+        }
+    }
 }
 
 /// A session read back from the database.
@@ -158,12 +174,7 @@ impl Store {
             None => {
                 let composed = compose();
                 let id = prompts::insert(&tx, profile.id, &composed, start.started_at)?;
-                LoadedPrompt {
-                    id,
-                    prompt: composed.prompt,
-                    targets: composed.targets,
-                    words: composed.words,
-                }
+                LoadedPrompt::composed(id, composed)
             }
         };
         tx.execute(
@@ -185,13 +196,7 @@ impl Store {
         )?;
         let id = SessionId(tx.last_insert_rowid());
         tx.commit()?;
-        Ok(StartedSession {
-            id,
-            targeted_words: loaded.targeted_words(),
-            prompt: loaded.prompt,
-            targets: loaded.targets,
-            words: loaded.words,
-        })
+        Ok(StartedSession::new(id, start.started_at, loaded))
     }
 
     /// Ends a session in one transaction: writes its events, sets its status
@@ -206,19 +211,9 @@ impl Store {
         let tx = self
             .conn
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let (profile_id, layout, already_ended): (i64, String, Option<i64>) = tx
-            .query_row(
-                "SELECT s.profile_id, p.layout, s.ended_at
-                 FROM sessions s JOIN profiles p ON p.id = s.profile_id
-                 WHERE s.id = ?1",
-                [id.0],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
-            )
-            .optional()?
-            .ok_or(Error::NoSuchSession(id))?;
-        if already_ended.is_some() {
-            return Err(Error::SessionAlreadyEnded(id));
-        }
+        let InFlight {
+            profile_id, layout, ..
+        } = in_flight(&tx, id)?;
 
         insert_events(&tx, id, end.state.events())?;
         let outcome = end.state.outcome().unwrap_or(Outcome::Interrupted);
@@ -236,6 +231,73 @@ impl Store {
         let next_id = prompts::insert(&tx, profile_id, end.next_prompt, end.ended_at)?;
         let context = Context::current(end.next_prompt.prompt.word_count(), &layout);
         prompts::set_next(&tx, profile_id, next_id, &context)?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Restarts an attempt: the session keeps its row and id but is moved
+    /// to `composed`, a freshly composed prompt, as of `restarted_at`, and
+    /// the prompt it was showing is deleted with its words and targets,
+    /// since no session refers to it any more. One transaction, on an
+    /// in-flight session only: a session that has ended is never changed.
+    pub fn restart_session(
+        &mut self,
+        id: SessionId,
+        composed: &ComposedPrompt,
+        restarted_at: i64,
+    ) -> Result<StartedSession> {
+        let tx = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let InFlight {
+            profile_id,
+            prompt_id: discarded,
+            ..
+        } = in_flight(&tx, id)?;
+
+        let prompt_id = prompts::insert(&tx, profile_id, composed, restarted_at)?;
+        tx.execute(
+            "UPDATE sessions SET prompt_id = ?2, started_at = ?3 WHERE id = ?1",
+            params![id.0, prompt_id, restarted_at],
+        )?;
+        prompts::delete(&tx, discarded)?;
+        tx.commit()?;
+        Ok(StartedSession::new(
+            id,
+            restarted_at,
+            LoadedPrompt::composed(prompt_id, composed.clone()),
+        ))
+    }
+
+    /// Discards an attempt nothing was typed into: the session row is
+    /// deleted and its prompt becomes the prompt waiting for the profile's
+    /// next session, recorded as composed for its own length, this corpus
+    /// and model version, and the profile's layout, so the next run of the
+    /// same shape shows it again. One transaction. Refused for a session
+    /// that has ended or has input events stored, since those are
+    /// sessions, not discarded attempts.
+    pub fn discard_session(&mut self, id: SessionId) -> Result<()> {
+        let tx = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let InFlight {
+            profile_id,
+            prompt_id,
+            word_count,
+            layout,
+        } = in_flight(&tx, id)?;
+        let typed: bool = tx.query_row(
+            "SELECT EXISTS (SELECT 1 FROM input_events WHERE session_id = ?1)",
+            [id.0],
+            |row| row.get(0),
+        )?;
+        if typed {
+            return Err(Error::SessionTyped(id));
+        }
+
+        tx.execute("DELETE FROM sessions WHERE id = ?1", [id.0])?;
+        let context = Context::current(word_count, &layout);
+        prompts::set_next(&tx, profile_id, prompt_id, &context)?;
         tx.commit()?;
         Ok(())
     }
@@ -263,6 +325,57 @@ impl Store {
             params![profile.id, limit as i64],
         )
     }
+}
+
+/// What an operation on a running session needs to know about its row.
+struct InFlight {
+    profile_id: i64,
+    prompt_id: i64,
+    /// How many words the session's prompt has.
+    word_count: usize,
+    /// The layout of the session's profile.
+    layout: String,
+}
+
+/// Reads a session's row for an operation that may only touch a session
+/// still in flight: an error names a missing session or one that has
+/// already ended.
+fn in_flight(conn: &Connection, id: SessionId) -> Result<InFlight> {
+    let (profile_id, prompt_id, word_count, layout, ended_at): (
+        i64,
+        i64,
+        i64,
+        String,
+        Option<i64>,
+    ) = conn
+        .query_row(
+            "SELECT s.profile_id, s.prompt_id, r.word_count, p.layout, s.ended_at
+             FROM sessions s
+             JOIN profiles p ON p.id = s.profile_id
+             JOIN prompts r ON r.id = s.prompt_id
+             WHERE s.id = ?1",
+            [id.0],
+            |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                ))
+            },
+        )
+        .optional()?
+        .ok_or(Error::NoSuchSession(id))?;
+    if ended_at.is_some() {
+        return Err(Error::SessionAlreadyEnded(id));
+    }
+    Ok(InFlight {
+        profile_id,
+        prompt_id,
+        word_count: index(word_count, "word_count")?,
+        layout,
+    })
 }
 
 /// Loads the sessions matching `clause`.

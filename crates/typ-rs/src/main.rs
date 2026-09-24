@@ -16,6 +16,7 @@ use typ_rs_core::compose;
 use typ_rs_core::corpus::{CORPUS_VERSION, Corpus};
 use typ_rs_core::display::{CursorStyle, Palette};
 use typ_rs_core::metrics::summarize;
+use typ_rs_core::prompt::Prompt;
 use typ_rs_core::scheduler;
 use typ_rs_core::session::{EndCondition, SEMANTICS_VERSION, SessionState};
 use typ_rs_store::{
@@ -126,14 +127,20 @@ fn main() -> ExitCode {
 
 /// Runs one session: the row is written before raw mode is entered and the
 /// events are saved after it is left, so the database is never touched while
-/// the user types. Afterward the session is applied to the profile's
-/// pattern statistics, what came of its targets is recorded, the next
-/// prompt is composed from the updated model, and everything is saved in
-/// one transaction. The prompt composed ahead for the next run is sized for
-/// the stored setting, not for a `--words` override, which touches this
-/// session only; a prompt composed on the spot because none fit is targeted
-/// all the same. The override is parsed here rather than by clap so that a
-/// bad value is refused on one line, as `typ config words` refuses it.
+/// the user types, except at a restart, when the discarded attempt's prompt
+/// is replaced by one composed on the spot from the model and history
+/// loaded here (nothing has changed them since), with a fresh seed so that
+/// it differs. An attempt left before its first typed character is
+/// discarded: its row is removed, its prompt put back to wait for the next
+/// run, and `nothing typed` is printed in place of results. Otherwise the
+/// session is applied to the profile's pattern statistics, what came of its
+/// targets is recorded, the next prompt is composed from the updated model,
+/// and everything is saved in one transaction. The prompt composed ahead for
+/// the next run is sized for the stored setting, not for a `--words`
+/// override, which touches this session only; a prompt composed on the spot
+/// because none fit is targeted all the same. The override is parsed here
+/// rather than by clap so that a bad value is refused on one line, as
+/// `typ config words` refuses it.
 fn session(words: Option<&str>, profile: Option<&str>) -> Result<(), Box<dyn Error>> {
     let words = words.map(parse_words).transpose()?;
     check_terminal()?;
@@ -153,43 +160,73 @@ fn session(words: Option<&str>, profile: Option<&str>) -> Result<(), Box<dyn Err
     };
     let model_at_start = store.model(&profile)?;
     let history_at_start = store.training_history(&profile)?;
-    let started = store.start_session(&profile, start, || {
+    let compose_now = |at: i64, seed: u64| {
         compose::next_prompt(
             &model_at_start,
             corpus,
             &config,
             &history_at_start,
-            started_at,
+            at,
             words,
-            fallback_seed,
+            seed,
         )
-    })?;
+    };
+    let mut started =
+        store.start_session(&profile, start, || compose_now(started_at, fallback_seed))?;
     let end = EndCondition::AfterWords(started.prompt.word_count());
     let palette = Palette::from_no_color(std::env::var("NO_COLOR").ok().as_deref());
     let cursor = store.cursor()?;
 
-    let run = interactive::run(started.prompt.clone(), end, palette, cursor)?;
+    let run = interactive::run(
+        started.prompt.clone(),
+        end,
+        palette,
+        cursor,
+        || -> Result<Prompt, Box<dyn Error>> {
+            let restarted_at = unix_now();
+            let composed = compose_now(restarted_at, getrandom::u64()?);
+            started = store
+                .restart_session(started.id, &composed, restarted_at)
+                .map_err(|e| format!("could not restart: {e}"))?;
+            Ok(started.prompt.clone())
+        },
+    )?;
 
+    let state = match run.attempt {
+        interactive::Attempt::Discarded => {
+            store
+                .discard_session(started.id)
+                .map_err(|e| format!("could not discard the attempt: {e}"))?;
+            println!("nothing typed");
+            print_diagnostics(&run.render_micros);
+            return Ok(());
+        }
+        interactive::Attempt::Session(state) => state,
+    };
     let ended = end_session(
         &mut store,
         &profile,
         &FinishedRun {
             started: &started,
-            state: &run.state,
-            started_at,
+            state: &state,
             ended_at: unix_now(),
             next_words: stored_words,
             seed,
         },
     );
     println!("{}", ended.results);
-    if std::env::var_os("TYP_DIAGNOSTICS").is_some_and(|v| !v.is_empty()) {
-        eprintln!("{}", render_diagnostics(&run.render_micros));
-    }
+    print_diagnostics(&run.render_micros);
     ended
         .saved
         .map_err(|e| format!("the session was not saved: {e}"))?;
     Ok(())
+}
+
+/// Prints the render timings to stderr when `TYP_DIAGNOSTICS` is set.
+fn print_diagnostics(render_micros: &[u64]) {
+    if std::env::var_os("TYP_DIAGNOSTICS").is_some_and(|v| !v.is_empty()) {
+        eprintln!("{}", render_diagnostics(render_micros));
+    }
 }
 
 /// A session that has been typed, with what its end needs to know.
@@ -197,7 +234,6 @@ struct FinishedRun<'a> {
     started: &'a StartedSession,
     state: &'a SessionState,
     /// Wall clock, Unix seconds.
-    started_at: i64,
     ended_at: i64,
     /// How many words the next prompt is to have.
     next_words: usize,
@@ -233,7 +269,7 @@ fn end_session(store: &mut Store, profile: &Profile, run: &FinishedRun) -> Ended
     });
     match loaded {
         Ok((mut model, mut history, recent)) => {
-            let update = model.apply_session(state, run.started_at, corpus, &config);
+            let update = model.apply_session(state, run.started.started_at, corpus, &config);
             let events = scheduler::achieved_doses(state, &run.started.targets);
             history.record(
                 &events,
@@ -523,7 +559,6 @@ mod tests {
         let run = FinishedRun {
             started: &started,
             state: &state,
-            started_at: 1_000,
             ended_at: 1_060,
             next_words: 2,
             seed: 7,

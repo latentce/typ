@@ -60,21 +60,41 @@ sequenceDiagram
     T->>U: enter raw mode, show prompt
     U->>T: keystrokes
     T->>C: feed input events to the session state machine
+    opt Shift-Tab
+        T->>C: compose a fresh prompt
+        T->>S: move the session to it, delete the old prompt
+        T->>U: repaint
+    end
     T->>U: leave raw mode
-    T->>C: apply session to the model
-    T->>C: record achieved doses in training history
-    T->>C: compose next prompt
-    T->>C: summarize against recent series
-    T->>S: save events, model, history, summary, next prompt (one transaction)
-    T->>U: print results
+    alt nothing typed
+        T->>S: delete the session row, put its prompt back to wait
+        T->>U: print "nothing typed"
+    else
+        T->>C: apply session to the model
+        T->>C: record achieved doses in training history
+        T->>C: compose next prompt
+        T->>C: summarize against recent series
+        T->>S: save events, model, history, summary, next prompt (one transaction)
+        T->>U: print results
+    end
 ```
 
-Two things about this order are deliberate.
+Three things about this order are deliberate.
 
 **The database is never touched while you type.** The session row is written
 before raw mode and the events after it. Nothing runs in the background
 during a session, and a crash mid-session still leaves a row marked
-interrupted.
+interrupted. The one exception is a restart, which is a moment when nothing
+is being typed: the fresh prompt is composed from the model and history
+loaded at startup (nothing has changed them) and written in one short
+transaction before it is painted.
+
+**Only sessions are recorded.** An attempt becomes a session at its first
+typed character. Restarting or leaving before that discards the attempt:
+its row is removed, and nothing about it reaches the model, the training
+history, or the deferral windows, which are all built from ended sessions.
+A prompt left untyped goes back to being the profile's waiting prompt, so
+the next run shows it again; a prompt restarted away from is deleted.
 
 **The next prompt is composed at the end of this session, not at the start
 of the next.** Composition takes tens of milliseconds and you are already
@@ -93,13 +113,16 @@ groups.
 
 ### Source of truth
 
-Written once, never changed.
+Written once and never changed, once a session has ended. While an attempt
+is in flight its row may still move: a restart repoints it at a freshly
+composed prompt and deletes the prompt it was showing, and leaving it
+untyped deletes the row itself.
 
 | Table | Holds |
 | --- | --- |
 | `profiles` | Name, layout, when created. |
 | `settings` | Per-profile settings (`words`) and the whole-database ones: the active profile, the cursor shape and blink. |
-| `prompts` | Every prompt shown: when it was composed, under which corpus version, how many words. |
+| `prompts` | Every prompt a session showed or is waiting to show: when it was composed, under which corpus version, how many words. |
 | `prompt_words` | Each word of each prompt: text, role (targeted or probe), exposed targets, selection score, contamination. |
 | `prompt_targets` | Each pattern selected for a prompt: role (target, deferred, explore), weakness mean and sd, priority, planned dose. |
 | `sessions` | Start and end time, outcome, seed, the semantics version and config it ran under, and which model version has applied it. |
@@ -116,7 +139,7 @@ that produced it.
 | `context_model` | The fitted context coefficients and how many completed sessions have been applied. |
 | `pattern_training_events` | What each selected target achieved in its session: the training history the scheduler reads. |
 | `session_metrics` | Each completed session's summary: gross WPM, standard-text WPM, the recent series with it included, probe figures. |
-| `next_prompt` | The prompt composed ahead for each profile. |
+| `next_prompt` | The prompt waiting for each profile's next session: the one composed ahead at the last session's end, or one put back by an attempt left untyped. |
 
 ### Rebuild
 
