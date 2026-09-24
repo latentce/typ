@@ -1,15 +1,21 @@
 # Manual smoke test: the terminal session
 
 The session loop, raw mode, and terminal restoration cannot be covered by
-automated tests, so run through this by hand after touching anything under
-`crates/typ-rs/src/`. Every step must leave a usable shell: cursor visible,
-typed text echoed, Enter runs commands. If a step leaves the terminal broken,
-`reset` recovers it; the bug is in the guard.
+automated tests. Run through this by hand after touching anything under
+`crates/typ-rs/src/`.
 
-Build first with `just build` (or `cargo build -p typ-rs`); the commands below
-use `just run`, which runs the debug binary. Export
-`TYP_DATA_DIR=/tmp/typ-smoke` first so the sessions typed here are kept
-apart from your own history.
+Every step must leave a usable shell: cursor visible, typed text echoed,
+Enter runs commands. If a step leaves the terminal broken, `reset` recovers
+it, and the bug is in the raw-mode guard.
+
+Setup:
+
+```
+export TYP_DATA_DIR=/tmp/typ-smoke    # keep these sessions out of your history
+just build
+```
+
+The steps use `just run`, which runs the debug binary.
 
 1. **Start.** `just run`. The prompt appears in muted gray directly below the
    command with a reverse-video caret on its first character. There is no

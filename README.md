@@ -1,181 +1,172 @@
 # typ
 
-A local terminal typing trainer. It measures which character patterns you are
-weak on (characters, bigrams, and trigrams, with space as an ordinary
-character) and composes practice prompts of real English words to improve
-them, while measuring whether the practice transfers to ordinary typing.
+A typing trainer for the terminal that works out which letter combinations
+slow you down or trip you up, and builds each practice prompt around them.
 
-Everything is local: no account, no server, no telemetry.
+```
+$ typ
+the quick brown fox jumps over the lazy dog ...
+
+68 wpm  96.2% raw  99.4% final  71% consistency
+74 wpm on standard text  +3 vs recent
+next: th, ou␣, ing (exploring ␣wr)
+```
+
+- Prompts are real English words, not random letter soup.
+- Everything runs locally in a single SQLite file. No account, no network.
+- It tracks characters, bigrams, and trigrams (spaces included), so "the end
+  of words that finish in `ou`" is a thing it can notice and practise.
+- It measures whether the practice actually transfers to ordinary text, and
+  is honest about the difference between a real gain and noise.
+
+How the adaptation works is described in
+[`docs/how-it-works.md`](docs/how-it-works.md).
 
 ## Status
 
-Early. `typ` runs one 50-word session: the prompt appears inline below the
-command, you type it, and it reports gross WPM, raw (first-attempt) accuracy,
-final accuracy, and consistency, then the speed you would have shown on
-standard text and how that compares with your recent sessions. Every session
-is saved, including interrupted ones, and the prompt for your next session is
-composed as soon as the current one ends.
+Early. The core loop (type, get measured, get a targeted prompt) is done and
+stable enough to use daily. Only the QWERTY layout exists. Not yet on
+crates.io.
 
-`typ config words 30` changes the session length (10 to 200 words) for every
-run to come; `typ --words 30` changes it for one run. Settings take effect on
-the very next run: a prompt composed ahead for other settings is replaced on
-the spot. Statistics live in profiles, one per typing condition, so a second
-keyboard layout gets its own history: `typ config profile laptop` switches to
-a profile (creating it on first use), `typ --profile laptop` uses one for a
-single run, and `typ config layout` shows or sets a profile's layout while
-nothing has been typed on it yet. Only `qwerty` exists so far.
+## Install
 
-After each session `typ` updates decaying statistics for every character,
-bigram, and trigram you typed (space counts as an ordinary character, so the
-start and end of words are patterns too), normalised for your usual speed and
-for how fast you were going that day. How much a session's speed counts
-depends on its raw accuracy: nothing at or below 90%, fully from 98%, so speed
-bought by accepting errors is not rewarded. From your fifth completed session
-on, and every five after that, `typ` also fits a small model of how much of a
-pattern's slowness is explained by its context: where it sits in its words,
-how long and how common they are, and what your fingers have to do to reach
-it on your layout (same finger, same hand, row change, key distance). That
-separates a pattern that is merely awkward on the keyboard from one you are
-personally weak on.
-
-From your second session on, prompts start targeting your weaknesses. Each
-bigram and trigram gets a weakness score combining how much more often you
-get it wrong, how much slower you type it once its context is accounted for,
-how much its timing varies, and how often you stall before it, all relative
-to your own typing as a whole and weighted toward accuracy, and held with an
-uncertainty rather than as a bare number. The scheduler samples from those
-uncertainties, ranks patterns by importance in real text, and picks up to
-five targets for the next prompt, keeping one per back-off chain (never both
-`th` and `ath`). A quarter of the candidates are randomly held back for
-three sessions as controls, so that later versions can tell practice from
-noise, and one extra pattern is picked purely because the model is unsure
-about it. A target that has had plenty of practice without changing is
-backed off for a while. The targeted share of a prompt ramps from 30% on the
-second session to 80% by the fifth; the rest are probes drawn from a frozen
-frequency-weighted distribution so improvement can be measured on material
-the scheduler never touched. After each session the results block ends with
-`next:` and the patterns the next prompt will practise.
-
-Targeted words are chosen so that every target gets a dose of about six
-exposures spread across varied words: each pick weighs how much coverage a
-word adds against how common it is, and marks down words you were drilled on
-in the last five sessions, words that stack more than three targets, and
-words over ten characters. No targeted word appears twice in a prompt, and
-two words exposing the same target are kept apart so you are not drilling
-one motion in consecutive words. Probes are never filtered, so a word you are
-practising can turn up as a probe; instead each probe records whether it or
-its patterns were targeted recently, so later analysis can tell clean
-transfer evidence from contaminated.
-
-Targeted prompts are harder than random ones by construction, so gross WPM
-falls when targeting starts. The second line of the results block corrects
-for that: `typ` compares how long your clean keystrokes took with how long
-its model predicted they would take on a typical day, for exactly those
-keystrokes, and applies that ratio to the model's prediction for a fixed
-sample of a thousand ordinary words. The result is the speed you would have
-shown on standard text, comparable from session to session whatever the
-prompt, and it is reported against a recency-weighted average of your recent
-sessions (`+3 vs recent`), or as `baseline recorded` on your first. An
-interrupted session shows how many words you completed and whether its
-observations were kept, and no speed: a partial prompt has no meaningful WPM.
-
-`typ stats` lists your recent completed sessions with their ids, gross WPM,
-speed on standard text, raw accuracy, and consistency; then your speed and
-raw accuracy over the last hundred probe words clear of recent targeted
-practice, marked `sustained improvement` or `sustained decline` only when
-the evidence separates them from the hundred before, with the probes that
-did overlap recent practice reported separately; the median time you took to
-start each word, session by session; and, for each pattern practised
-recently, how you type it in words that were used for that practice against
-words that were not. Then come the
-ten patterns you are slowest on relative to your baseline, the ten you most
-often get wrong, each with how much evidence is behind it, the ten weakest as
-mean ± uncertainty, and the candidates currently held back with the sessions
-remaining. Every statistic is a cache: `typ rebuild` recomputes all of them
-from your stored sessions, and an upgrade that changes the algorithm does so
-automatically. `typ replay <id>` shows how a stored session was interpreted:
-each word's first attempt, its own raw accuracy, and the patterns its errors
-count against, and which keystroke intervals count as clean motor evidence.
-`typ replay <id> --diff` instead runs the session through the current
-pipeline and lists every figure that differs from what was stored for it.
-
-```
-$ typ --version
-$ typ
-$ typ --words 30 --profile laptop
-$ typ config words 30
-$ typ config profile laptop
-$ typ stats
-$ typ rebuild
-$ typ replay 12
-$ typ replay 12 --diff
-```
-
-Set `NO_COLOR` to get bold and underline instead of colour. `Ctrl-C` or `Esc`
-ends a session early.
-
-Data lives in a single SQLite file under your platform's data directory:
-`~/.local/share/typ/typ.db` on Linux, `~/Library/Application Support/typ/` on
-macOS, `%APPDATA%\typ\` on Windows. Nothing leaves your machine.
-
-## Installing
-
-Not yet on crates.io. Until it is, install from a checkout:
+From a checkout:
 
 ```
 cargo install --path crates/typ-rs
 ```
 
-Once published, `cargo install typ-rs` will install and update the `typ`
-command.
+This puts a `typ` binary in `~/.cargo/bin`.
+
+## Using it
+
+### A session
+
+Run `typ`. The prompt appears below your shell prompt; start typing. Mistakes
+show in red, backspace fixes them. `Ctrl-C` or `Esc` ends early.
+
+When you finish, three lines print:
+
+| Line | Meaning |
+| --- | --- |
+| `68 wpm  96.2% raw  99.4% final  71% consistency` | Gross WPM; accuracy on your first try at each character; accuracy of what you submitted after corrections; how even your keystroke timing was. |
+| `74 wpm on standard text  +3 vs recent` | Your speed translated to ordinary text. Targeted prompts are deliberately harder, so raw WPM drops when targeting kicks in; this figure corrects for that and is the one to watch. `baseline recorded` on your first session. |
+| `next: th, ou␣, ing (exploring ␣wr)` | The patterns the next prompt will practise, weakest first, plus one the model is merely unsure about. `␣` is a space, so `ou␣` means "words ending in ou". |
+
+Your first session is a plain sample of common words. From the second session
+on, part of the prompt targets your weaknesses; that share ramps from 30% to
+80% over your first few sessions.
+
+Interrupted sessions are saved too. They report how many words you got
+through and no speed.
+
+### Settings and profiles
+
+```
+typ --words 30               # 30 words, this run only
+typ config words 30          # 30 words from now on (10 to 200)
+typ config words             # show the current setting
+
+typ --profile laptop         # use a profile for this run (created if new)
+typ config profile laptop    # switch to it permanently
+typ config layout            # show this profile's layout (only qwerty exists)
+```
+
+A profile is an isolated history. Use one per physically different setup: a
+different keyboard, a different layout. Stats never mix across profiles.
+
+### Looking at your history
+
+```
+typ stats
+```
+
+Shows your last ten sessions, then:
+
+- **probes**: speed and accuracy over your last hundred "probe" words (words
+  chosen at random, not for practice), marked `sustained improvement` or
+  `sustained decline` only when the change is statistically separable from
+  the hundred before.
+- **word initiation**: median time to start each word, per session.
+- **transfer to untargeted words**: for each recently practised pattern, how
+  you type it in words used for drilling versus words that were not.
+- **slowest / most error-prone / weakest patterns**, each with how much
+  evidence backs the estimate.
+- **deferred candidates**: patterns being held back as controls.
+
+```
+typ replay 12          # how session 12 was interpreted, word by word
+typ replay 12 --diff   # what the current algorithm would say differently
+typ rebuild            # recompute every statistic from stored sessions
+```
+
+Every statistic is a cache over the raw keystroke log. `rebuild` is safe to
+run any time, and runs automatically after an upgrade that changes the
+algorithm.
+
+### Environment
+
+| Variable | Effect |
+| --- | --- |
+| `NO_COLOR` | Bold and underline instead of colour. |
+| `TYP_DATA_DIR` | Use this directory for the database instead of the platform default. |
+
+Data lives in one file: `~/.local/share/typ/typ.db` on Linux,
+`~/Library/Application Support/typ/typ.db` on macOS, `%APPDATA%\typ\typ.db`
+on Windows.
 
 ## Developing
 
-With [`just`](https://github.com/casey/just) installed, `just` lists the
-common tasks:
+You need a Rust toolchain and [`just`](https://github.com/casey/just).
+`just` on its own lists every recipe.
+
+| Recipe | What it does |
+| --- | --- |
+| `just run [args]` | Build debug and run `typ`. `just run stats`, `just run --words 20`, etc. |
+| `just build` / `just release` | Build the `typ` binary, debug or release. |
+| `just test` | `cargo test --workspace`. |
+| `just lint` | Clippy with warnings as errors. |
+| `just fmt` | `cargo fmt --all`. |
+| `just check` | Format check, lint, and tests. Run before committing. |
+| `just sim [args]` | Run the simulator against synthetic typists (release build). |
+| `just sim-gate` | The simulator's integration tests with optimisations on. |
+| `just doc` | Build and open rustdoc for the workspace. |
+| `just install` / `just uninstall` | Install `typ` from this checkout into `~/.cargo/bin`, or remove it. |
+
+Aliases: `just r`, `b`, `t`, `c` for run, build, test, check.
+
+Point `TYP_DATA_DIR` at a scratch directory while developing so experiments
+stay out of your own history:
 
 ```
-just run              # build and run typ from source
-just run --version
-just test
-just check            # fmt, clippy, tests: run before committing
+TYP_DATA_DIR=/tmp/typ-dev just run
 ```
 
-Without it, the equivalents are `cargo build -p typ-rs && ./target/debug/typ`,
-`cargo test --workspace`, and so on.
+### Where things live
 
-The terminal loop itself is checked by hand; see
-[`docs/smoke-test.md`](docs/smoke-test.md). Set `TYP_DATA_DIR` to point a run
-at a different database directory, so that experiments do not touch your own
-history.
+```
+crates/
+  typ-rs-core/    session state machine, analysis, model, scheduler, composer, corpus
+  typ-rs-store/   SQLite persistence, migrations, rebuild
+  typ-rs/         the `typ` binary: terminal loop, CLI, reports
+  typ-sim/        simulator: drives the real pipeline with synthetic learners
+docs/
+  how-it-works.md   how a session becomes the next prompt
+  architecture.md   crates, data flow, persistence, versioning
+  simulator.md      what the simulator is for and what it has shown
+  smoke-test.md     manual checklist for the terminal loop
+```
 
-The scheduler is checked against synthetic learners by the simulator; see
-[`docs/simulator.md`](docs/simulator.md). `just sim` runs it, and
-`just sim-gate` runs its integration tests with optimisations on, which is
-how the end-of-session timing budget is meant to be asserted.
-
-The workspace has four crates:
-
-- `crates/typ-rs-core`: session state machine, analysis, model, scheduler, word
-  selection, and the corpus. No terminal or database dependency.
-- `crates/typ-rs-store`: SQLite persistence, migrations, and rebuild.
-- `crates/typ-rs`: the `typ` binary (terminal and CLI).
-- `crates/typ-sim`: a simulator that drives the same pipeline with synthetic
-  learners, never published.
-
-The corpus is compiled in from `crates/typ-rs-core/corpus/1grams_english.csv` and derived at
-startup; editing that file or the filter rules in `typ-rs-core` is a corpus
-version bump.
+The terminal loop is checked by hand; run through
+[`docs/smoke-test.md`](docs/smoke-test.md) after touching `crates/typ-rs/src/`.
 
 ## Licence
 
-Licensed under the [MIT licence](LICENSE-MIT).
+[MIT](LICENSE-MIT).
 
-### Corpus attribution
-
-The bundled corpus is derived from the English unigram list in
+The bundled word list is derived from the English unigram list in
 [orgtre/google-books-ngram-frequency](https://github.com/orgtre/google-books-ngram-frequency),
-itself computed from the Google Books Ngram Viewer Exports (version 3). Both
-are licensed under the
-[Creative Commons Attribution 3.0 Unported License](https://creativecommons.org/licenses/by/3.0/).
-The unmodified source list and the licence text are in [`crates/typ-rs-core/corpus/`](crates/typ-rs-core/corpus/).
+computed from the Google Books Ngram Viewer Exports v3, both under
+[CC BY 3.0](https://creativecommons.org/licenses/by/3.0/). The unmodified
+source and licence text are in
+[`crates/typ-rs-core/corpus/`](crates/typ-rs-core/corpus/).
