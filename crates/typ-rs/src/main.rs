@@ -15,15 +15,22 @@ use typ_rs_core::analysis::analyze;
 use typ_rs_core::compose;
 use typ_rs_core::corpus::{CORPUS_VERSION, Corpus};
 use typ_rs_core::display::Palette;
+use typ_rs_core::metrics::summarize;
 use typ_rs_core::scheduler;
-use typ_rs_core::session::{EndCondition, SEMANTICS_VERSION};
-use typ_rs_store::{Profile, SessionId, SessionStart, Store, parse_words, unix_now};
+use typ_rs_core::session::{EndCondition, SEMANTICS_VERSION, SessionState};
+use typ_rs_store::{
+    Profile, SessionEnd, SessionId, SessionStart, StartedSession, Store, parse_words, unix_now,
+};
 
 /// Narrower than this and no useful prompt can be shown.
 const MIN_COLUMNS: u16 = 20;
 
 /// How many completed sessions `typ stats` lists.
 const LISTED_SESSIONS: usize = 10;
+
+/// How many completed sessions `typ stats` reads probe words from: enough
+/// for two full probe windows once prompts are mostly targeted.
+const PROBE_SESSIONS: usize = 50;
 
 const DATABASE_FILE: &str = "typ.db";
 
@@ -55,8 +62,9 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
-    /// List recent completed sessions, the patterns you are slowest, most
-    /// error-prone, and weakest on, and the candidates being held back
+    /// Show recent sessions, probe and word-initiation trends, transfer to
+    /// untargeted words, the patterns you are weakest on, and the
+    /// candidates being held back
     Stats,
     /// Show a setting, or set it for every run to come
     Config {
@@ -71,6 +79,10 @@ enum Command {
     Replay {
         /// The session id, as listed by `typ stats`
         session_id: SessionId,
+        /// Instead, show where the current pipeline's figures for the
+        /// session differ from the ones stored for it
+        #[arg(long)]
+        diff: bool,
     },
 }
 
@@ -97,7 +109,7 @@ fn main() -> ExitCode {
             Err("--profile applies only to a session, stats, or config".into())
         }
         Some(Command::Rebuild) => rebuild(),
-        Some(Command::Replay { session_id }) => replay(session_id),
+        Some(Command::Replay { session_id, diff }) => replay(session_id, diff),
     };
     match outcome {
         Ok(()) => ExitCode::SUCCESS,
@@ -151,24 +163,76 @@ fn session(words: Option<&str>, profile: Option<&str>) -> Result<(), Box<dyn Err
     let end = EndCondition::AfterWords(started.prompt.word_count());
     let palette = Palette::from_no_color(std::env::var("NO_COLOR").ok().as_deref());
 
-    let run = interactive::run(started.prompt, end, palette)?;
+    let run = interactive::run(started.prompt.clone(), end, palette)?;
 
-    // Save before printing, but compute the results first so that a
-    // persistence failure still shows them, followed by the error. The
-    // results come from the same analysis the statistics were built from,
-    // unless the model could not even be loaded; then there is no next
-    // prompt to report either.
-    let ended_at = unix_now();
-    let loaded = store
-        .model(&profile)
-        .and_then(|model| Ok((model, store.training_history(&profile)?)));
-    let (results, saved) = match loaded {
-        Ok((mut model, mut history)) => {
-            let update = model.apply_session(&run.state, started_at, corpus, &config);
-            let events = scheduler::achieved_doses(&run.state, &started.targets);
+    let ended = end_session(
+        &mut store,
+        &profile,
+        &FinishedRun {
+            started: &started,
+            state: &run.state,
+            started_at,
+            ended_at: unix_now(),
+            next_words: stored_words,
+            seed,
+        },
+    );
+    println!("{}", ended.results);
+    if std::env::var_os("TYP_DIAGNOSTICS").is_some_and(|v| !v.is_empty()) {
+        eprintln!("{}", render_diagnostics(&run.render_micros));
+    }
+    ended
+        .saved
+        .map_err(|e| format!("the session was not saved: {e}"))?;
+    Ok(())
+}
+
+/// A session that has been typed, with what its end needs to know.
+struct FinishedRun<'a> {
+    started: &'a StartedSession,
+    state: &'a SessionState,
+    /// Wall clock, Unix seconds.
+    started_at: i64,
+    ended_at: i64,
+    /// How many words the next prompt is to have.
+    next_words: usize,
+    /// Seeds the composition of the next prompt.
+    seed: u64,
+}
+
+/// What ending a session produced: the results block, and whether the
+/// session was saved.
+struct Ended {
+    results: String,
+    saved: typ_rs_store::Result<()>,
+}
+
+/// Ends a finished session: applies it to the profile's model, records
+/// what came of its targets, composes the next prompt from the updated
+/// model, summarises the session against the recent series, saves
+/// everything in one transaction, and returns the results block to print.
+/// The results are composed before the save so that a persistence failure
+/// still shows them; they come from the same analysis the statistics were
+/// built from, unless the model could not even be loaded, when there is no
+/// next prompt to report either.
+fn end_session(store: &mut Store, profile: &Profile, run: &FinishedRun) -> Ended {
+    let corpus = Corpus::bundled();
+    let config = *store.config();
+    let state = run.state;
+    let loaded = store.model(profile).and_then(|model| {
+        Ok((
+            model,
+            store.training_history(profile)?,
+            store.recent_series(profile)?,
+        ))
+    });
+    match loaded {
+        Ok((mut model, mut history, recent)) => {
+            let update = model.apply_session(state, run.started_at, corpus, &config);
+            let events = scheduler::achieved_doses(state, &run.started.targets);
             history.record(
                 &events,
-                started.targeted_words.iter().map(AsRef::as_ref),
+                run.started.targeted_words.iter().map(AsRef::as_ref),
                 &config,
             );
             let next = compose::next_prompt(
@@ -176,38 +240,74 @@ fn session(words: Option<&str>, profile: Option<&str>) -> Result<(), Box<dyn Err
                 corpus,
                 &config,
                 &history,
-                ended_at,
-                stored_words,
-                seed,
+                run.ended_at,
+                run.next_words,
+                run.seed,
             );
-            let results = report::results(&run.state, &update.analysis.metrics, Some(&next));
-            let saved =
-                store.finish_session(started.id, &run.state, &model, &events, &next, ended_at);
-            (results, saved)
+            let summary = summarize(state, &update, &run.started.words, recent.as_ref(), &config);
+            let results = report::results(&report::Ending {
+                state,
+                metrics: &update.analysis.metrics,
+                summary: summary.as_ref(),
+                previous: recent.as_ref(),
+                observations_saved: Some(update.applied.is_some()),
+                next: Some(&next),
+            });
+            let saved = store.finish_session(
+                run.started.id,
+                &SessionEnd {
+                    state,
+                    model: &model,
+                    events: &events,
+                    summary: summary.as_ref(),
+                    next_prompt: &next,
+                    ended_at: run.ended_at,
+                },
+            );
+            Ended { results, saved }
         }
-        Err(e) => (
-            report::results(&run.state, &analyze(&run.state).metrics, None),
-            Err(e),
-        ),
-    };
-    println!("{results}");
-    if std::env::var_os("TYP_DIAGNOSTICS").is_some_and(|v| !v.is_empty()) {
-        eprintln!("{}", render_diagnostics(&run.render_micros));
+        Err(e) => Ended {
+            results: report::results(&report::Ending {
+                state,
+                metrics: &analyze(state).metrics,
+                summary: None,
+                previous: None,
+                observations_saved: None,
+                next: None,
+            }),
+            saved: Err(e),
+        },
     }
-    saved.map_err(|e| format!("the session was not saved: {e}"))?;
-    Ok(())
 }
 
 fn stats(profile: Option<&str>) -> Result<(), Box<dyn Error>> {
     let mut store = open_store()?;
     let profile = open_profile(&mut store, profile)?;
-    let sessions = store.completed_sessions(&profile, LISTED_SESSIONS)?;
-    print!("{}", report::session_listing(&sessions));
-    let model = store.model(&profile)?;
-    let history = store.training_history_with_waiting_prompt(&profile)?;
+    let sessions = store.completed_sessions(&profile, PROBE_SESSIONS)?;
+    let listed = &sessions[..sessions.len().min(LISTED_SESSIONS)];
+    print!("{}", report::session_listing(listed));
+    let analyses = report::analyses(&sessions);
+    let performances = report::performances(&sessions, &analyses);
+    print!("{}", report::probe_section(&performances));
     print!(
         "{}",
-        report::pattern_summary(&model, Corpus::bundled(), store.config(), &history)
+        report::word_initiation_line(&performances[..listed.len()])
+    );
+    let ended_history = store.training_history(&profile)?;
+    print!(
+        "{}",
+        report::transfer_section(&sessions, &analyses, &ended_history, store.config())
+    );
+    let model = store.model(&profile)?;
+    let history_with_waiting = store.training_history_with_waiting_prompt(&profile)?;
+    print!(
+        "{}",
+        report::pattern_summary(
+            &model,
+            Corpus::bundled(),
+            store.config(),
+            &history_with_waiting
+        )
     );
     Ok(())
 }
@@ -249,7 +349,10 @@ fn rebuild() -> Result<(), Box<dyn Error>> {
 /// saw. The hesitation threshold follows the session's own running median,
 /// since the user baseline in force when it was applied is not stored, so a
 /// borderline pause may class differently here than it did in the model.
-fn replay(session_id: SessionId) -> Result<(), Box<dyn Error>> {
+/// With `--diff`, the profile's sessions are instead replayed through the
+/// current model up to this one and its figures compared with the stored
+/// summary.
+fn replay(session_id: SessionId, diff: bool) -> Result<(), Box<dyn Error>> {
     let store = open_store()?;
     let session = store.session(session_id)?;
     if session.semantics_version != SEMANTICS_VERSION {
@@ -257,6 +360,14 @@ fn replay(session_id: SessionId) -> Result<(), Box<dyn Error>> {
             "typ: session {session_id} was recorded under editing rules version {}; replaying under version {SEMANTICS_VERSION}",
             session.semantics_version
         );
+    }
+    if diff {
+        let recomputed = store.recompute_summary(session_id)?;
+        print!(
+            "{}",
+            report::summary_diff(recomputed.current.as_ref(), recomputed.stored.as_ref())
+        );
+        return Ok(());
     }
     let state = session.replay();
     let analysis = analyze(&state);
@@ -323,6 +434,10 @@ fn render_diagnostics(render_micros: &[u64]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use typ_rs_core::compose::ComposedPrompt;
+    use typ_rs_core::prompt::Prompt;
+    use typ_rs_core::session::{Input, Key};
+    use typ_rs_store::DEFAULT_PROFILE;
 
     #[test]
     fn render_diagnostics_summarise_the_batches() {
@@ -334,5 +449,62 @@ mod tests {
             render_diagnostics(&[]),
             "render: 0 batches, mean 0 µs, max 0 µs"
         );
+    }
+
+    #[test]
+    fn the_results_are_composed_before_the_save_and_survive_a_store_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = Store::open(&dir.path().join("typ.db")).unwrap();
+        let profile = store.profile(DEFAULT_PROFILE).unwrap();
+        let prompt = || Prompt::new(["cat", "dog"]);
+        let started = store
+            .start_session(
+                &profile,
+                SessionStart {
+                    started_at: 1_000,
+                    seed: 1,
+                    word_count: 2,
+                },
+                || ComposedPrompt::probes(prompt()),
+            )
+            .unwrap();
+        let mut state = SessionState::new(prompt(), EndCondition::AfterWords(2));
+        for (i, c) in "cat dog".chars().enumerate() {
+            state.apply_event(Input::new(i as u64 * 100_000, Key::Char(c)));
+        }
+
+        let run = FinishedRun {
+            started: &started,
+            state: &state,
+            started_at: 1_000,
+            ended_at: 1_060,
+            next_words: 2,
+            seed: 7,
+        };
+        let ended = end_session(&mut store, &profile, &run);
+        assert!(ended.saved.is_ok(), "{:?}", ended.saved);
+        let lines: Vec<&str> = ended.results.lines().collect();
+        assert_eq!(
+            lines[0],
+            "140 wpm  100.0% raw  100.0% final  100% consistency"
+        );
+        assert!(
+            lines[1].ends_with(" wpm on standard text  baseline recorded"),
+            "{}",
+            lines[1]
+        );
+        assert!(lines[2].starts_with("next: "), "{}", lines[2]);
+
+        // Ending the same session again fails to save, but the results
+        // are there to print all the same, with the model's next targets.
+        let again = end_session(&mut store, &profile, &run);
+        assert!(again.saved.is_err());
+        let lines: Vec<&str> = again.results.lines().collect();
+        assert_eq!(
+            lines[0],
+            "140 wpm  100.0% raw  100.0% final  100% consistency"
+        );
+        assert!(lines[1].contains(" vs recent"), "{}", lines[1]);
+        assert!(lines[2].starts_with("next: "), "{}", lines[2]);
     }
 }

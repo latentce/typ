@@ -5,8 +5,9 @@ use std::num::ParseIntError;
 use std::str::FromStr;
 
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
-use typ_rs_core::compose::ComposedPrompt;
+use typ_rs_core::compose::{ComposedPrompt, ComposedWord};
 use typ_rs_core::corpus::CORPUS_VERSION;
+use typ_rs_core::metrics::SessionSummary;
 use typ_rs_core::model::{MODEL_VERSION, ModelState};
 use typ_rs_core::prompt::Prompt;
 use typ_rs_core::scheduler::{SelectedTarget, TrainingEvent};
@@ -15,7 +16,7 @@ use typ_rs_core::session::{
 };
 
 use crate::prompts::{self, Context, LoadedPrompt};
-use crate::{Error, Profile, Result, Store, model, training};
+use crate::{Error, Profile, Result, Store, model, summaries, training};
 
 /// A session's row id, the handle a user names a stored session by.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -62,6 +63,9 @@ pub struct StartedSession {
     pub prompt: Prompt,
     /// Every pattern selected for the prompt, targets first.
     pub targets: Vec<SelectedTarget>,
+    /// One entry per word of the prompt: its role and what was recorded
+    /// when it was chosen.
+    pub words: Vec<ComposedWord>,
     /// The prompt's words shown as targeted, in prompt order; what the
     /// training history records for the session.
     pub targeted_words: Vec<Box<str>>,
@@ -87,7 +91,12 @@ pub struct StoredSession {
     pub prompt: Prompt,
     /// Every pattern selected for the prompt, targets first.
     pub targets: Vec<SelectedTarget>,
+    /// One entry per word of the prompt, as composed.
+    pub words: Vec<ComposedWord>,
     pub events: Vec<InputEvent>,
+    /// The session's cached figures; `None` for an interrupted session, and
+    /// for a completed one not yet applied.
+    pub summary: Option<SessionSummary>,
 }
 
 impl StoredSession {
@@ -101,6 +110,26 @@ impl StoredSession {
             &self.events,
         )
     }
+}
+
+/// Everything a session's end writes, computed in memory before the
+/// transaction so that a persistence failure still leaves the caller with
+/// results to show.
+#[derive(Debug, Clone, Copy)]
+pub struct SessionEnd<'a> {
+    pub state: &'a SessionState,
+    /// The profile's model with the session applied.
+    pub model: &'a ModelState,
+    /// What came of the session's targets, one per pattern selected for
+    /// its prompt.
+    pub events: &'a [TrainingEvent],
+    /// The session's summary; `None` for an interrupted session, which has
+    /// none.
+    pub summary: Option<&'a SessionSummary>,
+    /// The prompt for the profile's next session.
+    pub next_prompt: &'a ComposedPrompt,
+    /// Wall clock, Unix seconds.
+    pub ended_at: i64,
 }
 
 impl Store {
@@ -131,9 +160,9 @@ impl Store {
                 let id = prompts::insert(&tx, profile.id, &composed, start.started_at)?;
                 LoadedPrompt {
                     id,
-                    targeted_words: composed.targeted_words().map(Box::from).collect(),
                     prompt: composed.prompt,
                     targets: composed.targets,
+                    words: composed.words,
                 }
             }
         };
@@ -158,30 +187,22 @@ impl Store {
         tx.commit()?;
         Ok(StartedSession {
             id,
+            targeted_words: loaded.targeted_words(),
             prompt: loaded.prompt,
             targets: loaded.targets,
-            targeted_words: loaded.targeted_words,
+            words: loaded.words,
         })
     }
 
     /// Ends a session in one transaction: writes its events, sets its status
     /// from the state's outcome, writes the pattern statistics the session
-    /// changed and the context model (`model` is the profile's model with
-    /// the session applied), writes what came of the session's targets
-    /// (`events`, one per pattern selected for its prompt), marks the
-    /// session applied under the current model version, and stores
-    /// `next_prompt` as the prompt for the profile's next session, recorded
+    /// changed and the context model, writes what came of the session's
+    /// targets, caches the session's summary if it has one, marks the
+    /// session applied under the current model version, and stores the
+    /// next prompt as the prompt for the profile's next session, recorded
     /// as composed for its own length, this corpus and model version, and
     /// the profile's layout. A session can end only once.
-    pub fn finish_session(
-        &mut self,
-        id: SessionId,
-        state: &SessionState,
-        model: &ModelState,
-        events: &[TrainingEvent],
-        next_prompt: &ComposedPrompt,
-        ended_at: i64,
-    ) -> Result<()> {
+    pub fn finish_session(&mut self, id: SessionId, end: &SessionEnd) -> Result<()> {
         let tx = self
             .conn
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
@@ -199,18 +220,21 @@ impl Store {
             return Err(Error::SessionAlreadyEnded(id));
         }
 
-        insert_events(&tx, id, state.events())?;
-        let outcome = state.outcome().unwrap_or(Outcome::Interrupted);
+        insert_events(&tx, id, end.state.events())?;
+        let outcome = end.state.outcome().unwrap_or(Outcome::Interrupted);
         tx.execute(
             "UPDATE sessions SET status = ?2, ended_at = ?3, applied_model_version = ?4
              WHERE id = ?1",
-            params![id.0, outcome.name(), ended_at, MODEL_VERSION],
+            params![id.0, outcome.name(), end.ended_at, MODEL_VERSION],
         )?;
-        model::write(&tx, profile_id, model)?;
-        training::write(&tx, profile_id, id, events)?;
+        model::write(&tx, profile_id, end.model)?;
+        training::write(&tx, profile_id, id, end.events)?;
+        if let Some(summary) = end.summary {
+            summaries::write(&tx, profile_id, id, summary)?;
+        }
 
-        let next_id = prompts::insert(&tx, profile_id, next_prompt, ended_at)?;
-        let context = Context::current(next_prompt.prompt.word_count(), &layout);
+        let next_id = prompts::insert(&tx, profile_id, end.next_prompt, end.ended_at)?;
+        let context = Context::current(end.next_prompt.prompt.word_count(), &layout);
         prompts::set_next(&tx, profile_id, next_id, &context)?;
         tx.commit()?;
         Ok(())
@@ -282,7 +306,9 @@ pub(crate) fn load_sessions(
                 semantics_version: row.semantics_version,
                 prompt: prompts::load(conn, row.prompt_id)?,
                 targets: prompts::load_targets(conn, row.prompt_id)?,
+                words: prompts::load_words(conn, row.prompt_id)?,
                 events: load_events(conn, row.id)?,
+                summary: summaries::load(conn, row.id)?,
             })
         })
         .collect()

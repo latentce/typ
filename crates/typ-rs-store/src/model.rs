@@ -16,12 +16,26 @@ use std::collections::btree_map::Entry;
 use rusqlite::{Connection, TransactionBehavior, params};
 use typ_rs_core::corpus::Corpus;
 use typ_rs_core::layout::Layout;
+use typ_rs_core::metrics::{RecentSeries, SessionSummary, summarize};
 use typ_rs_core::model::context::{Coefficients, FEATURE_COUNT, Feature, Features};
 use typ_rs_core::model::{ContextModel, MODEL_VERSION, ModelState, PatternStats, SchedulerConfig};
 use typ_rs_core::scheduler::achieved_doses;
+use typ_rs_core::session::SessionState;
 
-use crate::sessions::load_sessions;
-use crate::{Error, Profile, Result, Store, training};
+use crate::sessions::{SessionId, StoredSession, load_sessions};
+use crate::{Error, Profile, Result, Store, summaries, training};
+
+/// A session's summary as the current pipeline computes it beside the one
+/// cached for it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RecomputedSummary {
+    /// From replaying the profile's sessions up to this one through the
+    /// current model; `None` for an interrupted session.
+    pub current: Option<SessionSummary>,
+    /// The cached row; `None` for an interrupted session or one not yet
+    /// applied.
+    pub stored: Option<SessionSummary>,
+}
 
 impl Store {
     /// The profile's pattern statistics and context model as last written,
@@ -40,9 +54,55 @@ impl Store {
                 "UPDATE sessions SET applied_model_version = NULL;
                  DELETE FROM pattern_stats;
                  DELETE FROM context_model;
-                 DELETE FROM pattern_training_events",
+                 DELETE FROM pattern_training_events;
+                 DELETE FROM session_metrics",
             )?;
             apply_unmarked(tx, &config)
+        })
+    }
+
+    /// Runs the profile's ended sessions up to and including `id`, oldest
+    /// first, through a fresh model as a rebuild would, and returns the
+    /// summary that gives the session beside the cached one. Nothing is
+    /// written: this is how a change to the pipeline is checked against
+    /// real data.
+    pub fn recompute_summary(&self, id: SessionId) -> Result<RecomputedSummary> {
+        let target = self.session(id)?;
+        let earlier = load_sessions(
+            &self.conn,
+            "WHERE s.profile_id = ?1 AND s.ended_at IS NOT NULL
+               AND (s.started_at < ?2 OR (s.started_at = ?2 AND s.id <= ?3))
+             ORDER BY s.started_at, s.id",
+            params![target.profile_id, target.started_at, id.raw()],
+        )?;
+        let corpus = Corpus::bundled();
+        let mut model = ModelState::from_rows(
+            load(&self.conn, target.profile_id)?.layout(),
+            [],
+            ContextModel::default(),
+        );
+        let mut recent: Option<RecentSeries> = None;
+        let mut current = None;
+        for session in &earlier {
+            let state = session.replay();
+            let summary = apply_one(
+                &mut model,
+                session,
+                &state,
+                recent.as_ref(),
+                corpus,
+                &self.config,
+            );
+            if let Some(summary) = &summary {
+                recent = Some(summary.recent);
+            }
+            if session.id == id {
+                current = summary;
+            }
+        }
+        Ok(RecomputedSummary {
+            current,
+            stored: target.summary,
         })
     }
 
@@ -55,6 +115,7 @@ impl Store {
             "SELECT EXISTS (SELECT 1 FROM pattern_stats WHERE model_version <> ?1)
                  OR EXISTS (SELECT 1 FROM context_model WHERE model_version <> ?1)
                  OR EXISTS (SELECT 1 FROM pattern_training_events WHERE model_version <> ?1)
+                 OR EXISTS (SELECT 1 FROM session_metrics WHERE model_version <> ?1)
                  OR EXISTS (SELECT 1 FROM sessions
                             WHERE applied_model_version IS NOT NULL
                               AND applied_model_version <> ?1)",
@@ -90,8 +151,10 @@ impl Store {
 }
 
 /// Applies every ended session without a marker, oldest first, to its
-/// profile's model, writes its training events, writes the models back,
-/// and sets the markers.
+/// profile's model, writes its training events and its summary, writes the
+/// models back, and sets the markers. Each profile's recent series starts
+/// from its latest summarised session before the first pending one and is
+/// carried forward from there.
 fn apply_unmarked(conn: &Connection, config: &SchedulerConfig) -> Result<usize> {
     let pending = load_sessions(
         conn,
@@ -100,29 +163,54 @@ fn apply_unmarked(conn: &Connection, config: &SchedulerConfig) -> Result<usize> 
         [],
     )?;
     let corpus = Corpus::bundled();
-    let mut models: BTreeMap<i64, ModelState> = BTreeMap::new();
+    let mut models: BTreeMap<i64, (ModelState, Option<RecentSeries>)> = BTreeMap::new();
     for session in &pending {
-        let model = match models.entry(session.profile_id) {
-            Entry::Occupied(model) => model.into_mut(),
-            Entry::Vacant(slot) => slot.insert(load(conn, session.profile_id)?),
+        let (model, recent) = match models.entry(session.profile_id) {
+            Entry::Occupied(entry) => entry.into_mut(),
+            Entry::Vacant(slot) => slot.insert((
+                load(conn, session.profile_id)?,
+                summaries::recent_before(
+                    conn,
+                    session.profile_id,
+                    Some((session.started_at, session.id)),
+                )?,
+            )),
         };
         let state = session.replay();
-        model.apply_session(&state, session.started_at, corpus, config);
+        let summary = apply_one(model, session, &state, recent.as_ref(), corpus, config);
         training::write(
             conn,
             session.profile_id,
             session.id,
             &achieved_doses(&state, &session.targets),
         )?;
+        if let Some(summary) = &summary {
+            summaries::write(conn, session.profile_id, session.id, summary)?;
+            *recent = Some(summary.recent);
+        }
         conn.execute(
             "UPDATE sessions SET applied_model_version = ?2 WHERE id = ?1",
             params![session.id.raw(), MODEL_VERSION],
         )?;
     }
-    for (profile_id, model) in &models {
+    for (profile_id, (model, _)) in &models {
         write(conn, *profile_id, model)?;
     }
     Ok(pending.len())
+}
+
+/// Applies one stored session, replayed as `state`, to the model and
+/// summarises it, exactly as the session's own end did.
+fn apply_one(
+    model: &mut ModelState,
+    session: &StoredSession,
+    state: &SessionState,
+    recent: Option<&RecentSeries>,
+    corpus: &Corpus,
+    config: &SchedulerConfig,
+) -> Option<SessionSummary> {
+    let update = model.apply_session(state, session.started_at, corpus, config);
+    summarize(state, &update, &session.words, recent, config)
 }
 
 /// The feature columns, in feature order, as they appear in both caches.

@@ -1,8 +1,8 @@
 //! Persistence for `typ`: profiles and their settings, prompts with the
 //! patterns selected for them, sessions, and input events in a local SQLite
 //! file, plus the caches derived from them: the pattern statistics, the
-//! context model, the training events, and the prompt composed ahead for
-//! the next session.
+//! context model, the training events, each completed session's summary,
+//! and the prompt composed ahead for the next session.
 //!
 //! The database is opened once per process. Sessions, prompts, and input
 //! events are the source of truth: a session's row is written before it
@@ -11,11 +11,13 @@
 //! whenever the model version changes, the next prompt when a session
 //! ends. Nothing here runs while a session is being typed.
 
+mod json;
 mod migrations;
 mod model;
 mod prompts;
 mod sessions;
 mod settings;
+mod summaries;
 mod training;
 
 use std::fmt;
@@ -25,7 +27,8 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use rusqlite::{Connection, OptionalExtension};
 use typ_rs_core::model::SchedulerConfig;
 
-pub use sessions::{SessionId, SessionStart, StartedSession, StoredSession};
+pub use model::RecomputedSummary;
+pub use sessions::{SessionEnd, SessionId, SessionStart, StartedSession, StoredSession};
 pub use settings::{DEFAULT_WORDS, WORDS_RANGE, parse_words};
 
 /// The profile every session belongs to until the user names another.

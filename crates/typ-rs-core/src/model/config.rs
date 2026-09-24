@@ -111,6 +111,9 @@ pub struct SchedulerConfig {
     /// A probe is contaminated by targeted practice in the last this many
     /// sessions.
     pub contamination_sessions: usize,
+    /// The half-life, in completed sessions, of the recent series a
+    /// session's figures are compared with.
+    pub recent_half_life_sessions: f64,
 }
 
 impl Default for SchedulerConfig {
@@ -159,6 +162,7 @@ impl Default for SchedulerConfig {
             length_penalty: 0.2,
             min_exposure_gap: 2,
             contamination_sessions: 10,
+            recent_half_life_sessions: 5.0,
         }
     }
 }
@@ -431,6 +435,12 @@ const TUNABLES: &[Tunable] = &[
         get: |c| c.contamination_sessions as f64,
         set: |c, v| c.contamination_sessions = v as usize,
         whole_number: true,
+    },
+    Tunable {
+        name: "recent_half_life_sessions",
+        get: |c| c.recent_half_life_sessions,
+        set: |c, v| c.recent_half_life_sessions = v,
+        whole_number: false,
     },
 ];
 

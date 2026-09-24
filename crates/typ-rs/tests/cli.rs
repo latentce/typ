@@ -1,12 +1,13 @@
 use std::path::Path;
 use std::process::Command;
 
-use typ_rs_core::compose::ComposedPrompt;
+use typ_rs_core::compose::{ComposedPrompt, ComposedWord, WordRole};
 use typ_rs_core::corpus::{CORPUS_VERSION, Corpus};
+use typ_rs_core::metrics::summarize;
 use typ_rs_core::prompt::Prompt;
 use typ_rs_core::scheduler::{SelectedTarget, TargetRole, achieved_doses};
 use typ_rs_core::session::{EndCondition, Input, Key, SessionState};
-use typ_rs_store::{DEFAULT_PROFILE, SessionStart, Store};
+use typ_rs_store::{DEFAULT_PROFILE, SessionEnd, SessionStart, Store};
 
 struct Run {
     ok: bool,
@@ -38,21 +39,22 @@ fn typ(args: &[&str]) -> Run {
 
 /// Types `script` against `prompt`, one key per 100 ms, and stores the
 /// session as started at `started_at`, applied to the profile's statistics
-/// the way a live session is. Whatever prompt is waiting is replaced by
-/// `prompt` again, as probes only, so every session in a test types
-/// `prompt`. `⌫` is backspace and `⎋` an interrupt.
+/// and summarised the way a live session is. Whatever prompt is waiting is
+/// replaced by `prompt` again, as probes only, so every session in a test
+/// types `prompt`. `⌫` is backspace and `⎋` an interrupt.
 fn store_session(store: &mut Store, started_at: i64, prompt: &str, script: &str) {
-    store_session_with(store, started_at, prompt, script, Vec::new());
+    store_session_with(store, started_at, prompt, script, Vec::new(), Vec::new());
 }
 
 /// As [`store_session`], with the given patterns selected for the prompt
-/// waiting afterwards.
+/// waiting afterwards and the given words of it shown as targeted.
 fn store_session_with(
     store: &mut Store,
     started_at: i64,
     prompt: &str,
     script: &str,
     next_targets: Vec<SelectedTarget>,
+    next_targeted_words: Vec<&str>,
 ) {
     let profile = store.profile(DEFAULT_PROFILE).unwrap();
     let words = || Prompt::new(prompt.split(' '));
@@ -81,12 +83,40 @@ fn store_session_with(
         state.apply_event(Input::new(i as u64 * 100_000, key));
     }
     let mut model = store.model(&profile).unwrap();
-    model.apply_session(&state, started_at, Corpus::bundled(), store.config());
+    let update = model.apply_session(&state, started_at, Corpus::bundled(), store.config());
     let events = achieved_doses(&state, &started.targets);
+    let recent = store.recent_series(&profile).unwrap();
+    let summary = summarize(
+        &state,
+        &update,
+        &started.words,
+        recent.as_ref(),
+        store.config(),
+    );
     let mut next = ComposedPrompt::probes(words());
     next.targets = next_targets;
+    for (word, meta) in next.prompt.words().iter().zip(&mut next.words) {
+        if next_targeted_words.contains(&word.as_ref()) {
+            *meta = ComposedWord {
+                role: WordRole::Targeted,
+                exposed_targets: Vec::new(),
+                selection_score: Some(0.0),
+                contamination: None,
+            };
+        }
+    }
     store
-        .finish_session(started.id, &state, &model, &events, &next, started_at + 60)
+        .finish_session(
+            started.id,
+            &SessionEnd {
+                state: &state,
+                model: &model,
+                events: &events,
+                summary: summary.as_ref(),
+                next_prompt: &next,
+                ended_at: started_at + 60,
+            },
+        )
         .unwrap();
 }
 
@@ -164,14 +194,29 @@ fn stats_lists_completed_sessions_most_recent_first_and_skips_interrupted_ones()
     let run = typ_in(dir.path(), &["stats"]);
     assert!(run.ok, "{}", run.stderr);
     let mut sections = run.stdout.split("\n\n");
+    // Every keystroke took 100 ms, so each session's speed on standard
+    // text is 120 wpm: the pace of its clean intervals, whatever the
+    // prompt. Gross WPM counts one character more than there are
+    // intervals, which shows on a two-word prompt.
     assert_eq!(
         sections.next().unwrap(),
-        "   2  2024-01-16 08:00    2 words  140 wpm  100.0% accuracy\n\
-         \x20  1  2024-01-15 10:30    2 words  120 wpm   66.7% accuracy"
+        "   2  2024-01-16 08:00    2 words  140 wpm  120 on standard text  100.0% raw  100% consistency\n\
+         \x20  1  2024-01-15 10:30    2 words  120 wpm  120 on standard text   83.3% raw  100% consistency"
+    );
+    // Four probe words: 15 characters (the last word of the second session
+    // ended without a space) over 1.2 s, with 11 of 12 target characters
+    // right the first time. Too few for a previous window, so no marker.
+    assert_eq!(
+        sections.next().unwrap(),
+        "probes\n  last   4 uncontaminated  150 wpm  91.7% raw"
+    );
+    assert_eq!(
+        sections.next().unwrap(),
+        "word initiation (median ms, oldest first)\n  100  100"
     );
     let slowest = sections.next().unwrap();
     assert!(slowest.starts_with("slowest patterns\n  "), "{slowest}");
-    // Every keystroke took 100 ms, so nothing is slower than the baseline.
+    // Nothing is slower than the baseline.
     assert!(
         slowest
             .lines()
@@ -204,6 +249,40 @@ fn stats_lists_completed_sessions_most_recent_first_and_skips_interrupted_ones()
 }
 
 #[test]
+fn stats_shows_transfer_of_recently_practised_patterns_to_untargeted_words() {
+    let dir = tempfile::tempdir().unwrap();
+    {
+        let mut store = Store::open(&dir.path().join("typ.db")).unwrap();
+        // The second prompt targets `at` through "cat"; "hat" is a probe
+        // in both sessions and never targeted.
+        store_session_with(
+            &mut store,
+            1_705_314_600,
+            "cat hat",
+            "cat hat",
+            vec![target("at", TargetRole::Target)],
+            vec!["cat"],
+        );
+        store_session(&mut store, 1_705_392_000, "cat hat", "cat hat");
+    }
+
+    let run = typ_in(dir.path(), &["stats"]);
+    assert!(run.ok, "{}", run.stderr);
+    let transfer = run
+        .stdout
+        .split("\n\n")
+        .find(|s| s.starts_with("transfer to untargeted words"))
+        .unwrap_or_else(|| panic!("{}", run.stdout));
+    // "cat" was targeted in the last ten sessions, so both its `t` slots
+    // are on the targeted side; both of "hat" are on the other.
+    assert_eq!(
+        transfer,
+        "transfer to untargeted words\n\
+         \x20 at   targeted  100 ms 100.0% raw  n   2  untargeted  100 ms 100.0% raw  n   2"
+    );
+}
+
+#[test]
 fn stats_shows_the_deferred_candidates_with_their_windows() {
     let dir = tempfile::tempdir().unwrap();
     {
@@ -219,6 +298,7 @@ fn stats_shows_the_deferred_candidates_with_their_windows() {
                 target("at", TargetRole::Target),
                 target("og", TargetRole::Deferred),
             ],
+            vec![],
         );
     }
 
@@ -319,6 +399,41 @@ fn replay_of_an_unknown_session_fails_with_one_line() {
     assert!(!run.ok);
     assert_eq!(run.stdout, "");
     assert_eq!(run.stderr, "typ: no session 7\n");
+}
+
+#[test]
+fn replay_diff_compares_the_current_pipeline_with_the_stored_summary() {
+    let dir = tempfile::tempdir().unwrap();
+    {
+        let mut store = Store::open(&dir.path().join("typ.db")).unwrap();
+        store_session(&mut store, 1_705_314_600, "cat dog", "cat dg ");
+        store_session(&mut store, 1_705_392_000, "cat dog", "cat dog");
+        store_session(&mut store, 1_705_400_000, "cat dog", "ca⎋");
+    }
+    for id in ["1", "2"] {
+        let run = typ_in(dir.path(), &["replay", id, "--diff"]);
+        assert!(run.ok, "{}", run.stderr);
+        assert_eq!(
+            run.stdout,
+            "no differences between the stored summary and the current pipeline\n"
+        );
+    }
+    let run = typ_in(dir.path(), &["replay", "3", "--diff"]);
+    assert!(run.ok, "{}", run.stderr);
+    assert_eq!(run.stdout, "no summary: the session was interrupted\n");
+
+    // A stored figure that the pipeline no longer produces shows up.
+    rusqlite::Connection::open(dir.path().join("typ.db"))
+        .unwrap()
+        .execute_batch("UPDATE session_metrics SET gross_wpm = 99 WHERE session_id = 2")
+        .unwrap();
+    let run = typ_in(dir.path(), &["replay", "2", "--diff"]);
+    assert!(run.ok, "{}", run.stderr);
+    assert_eq!(
+        run.stdout,
+        "differences from the stored summary\n\
+         \x20 gross_wpm                        stored    99.0000  current   140.0000\n"
+    );
 }
 
 // --- Configuration -----------------------------------------------------------

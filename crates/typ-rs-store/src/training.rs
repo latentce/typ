@@ -28,6 +28,7 @@ impl Store {
     ) -> Result<TrainingHistory> {
         let mut history = self.training_history(profile)?;
         if let Some(waiting) = prompts::next_waiting(&self.conn, profile.id)? {
+            let targeted_words = waiting.targeted_words();
             let events: Vec<TrainingEvent> = waiting
                 .targets
                 .into_iter()
@@ -38,7 +39,7 @@ impl Store {
                 .collect();
             history.record(
                 &events,
-                waiting.targeted_words.iter().map(AsRef::as_ref),
+                targeted_words.iter().map(AsRef::as_ref),
                 &self.config,
             );
         }

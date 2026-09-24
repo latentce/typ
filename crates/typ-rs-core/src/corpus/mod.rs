@@ -10,7 +10,7 @@ mod source;
 
 use std::sync::LazyLock;
 
-pub use reference::ReferenceDistribution;
+pub use reference::{REFERENCE_SAMPLE_WORDS, ReferenceDistribution};
 pub use source::{CORPUS_VERSION, CorpusError};
 
 const MAX_WORDS: usize = 10_000;

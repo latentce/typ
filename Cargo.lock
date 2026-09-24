@@ -636,6 +636,7 @@ dependencies = [
  "crossterm",
  "dirs",
  "getrandom",
+ "rusqlite",
  "tempfile",
  "typ-rs-core",
  "typ-rs-store",

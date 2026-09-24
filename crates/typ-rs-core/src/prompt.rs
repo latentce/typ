@@ -49,6 +49,17 @@ impl Prompt {
         self.words.join(" ")
     }
 
+    /// Every slot of the prompt in reading order: each word's characters
+    /// and the space that separates it from the next. The last word has no
+    /// space after it.
+    pub fn slots(&self) -> impl Iterator<Item = Slot> + '_ {
+        let last = self.words.len() - 1;
+        self.words.iter().enumerate().flat_map(move |(word, text)| {
+            let length = text.chars().count() + usize::from(word < last);
+            (0..length).map(move |position| Slot { word, position })
+        })
+    }
+
     /// The character expected at a slot: the word's character at that
     /// position, or the space that follows the word at the position just past
     /// its end.

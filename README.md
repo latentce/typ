@@ -11,9 +11,10 @@ Everything is local: no account, no server, no telemetry.
 
 Early. `typ` runs one 50-word session: the prompt appears inline below the
 command, you type it, and it reports gross WPM, raw (first-attempt) accuracy,
-final accuracy, and consistency. Every session is saved, including
-interrupted ones, and the prompt for your next session is composed as soon as
-the current one ends.
+final accuracy, and consistency, then the speed you would have shown on
+standard text and how that compares with your recent sessions. Every session
+is saved, including interrupted ones, and the prompt for your next session is
+composed as soon as the current one ends.
 
 `typ config words 30` changes the session length (10 to 200 words) for every
 run to come; `typ --words 30` changes it for one run. Settings take effect on
@@ -66,17 +67,37 @@ practising can turn up as a probe; instead each probe records whether it or
 its patterns were targeted recently, so later analysis can tell clean
 transfer evidence from contaminated.
 
-`typ stats` lists your recent completed
-sessions with their ids, then the ten patterns you are slowest on relative to
-your baseline, the ten you most often get wrong, each with how much
-evidence is behind it, the ten weakest as mean ± uncertainty, and the
-candidates currently held back with the sessions remaining. Every statistic
-is a cache: `typ rebuild` recomputes
-all of them from your stored sessions, and an upgrade that changes the
-algorithm does so automatically. `typ replay <id>` shows how a stored session
-was interpreted: each word's first attempt, its own raw accuracy, and the
-patterns its errors count against, and which keystroke intervals count as
-clean motor evidence.
+Targeted prompts are harder than random ones by construction, so gross WPM
+falls when targeting starts. The second line of the results block corrects
+for that: `typ` compares how long your clean keystrokes took with how long
+its model predicted they would take on a typical day, for exactly those
+keystrokes, and applies that ratio to the model's prediction for a fixed
+sample of a thousand ordinary words. The result is the speed you would have
+shown on standard text, comparable from session to session whatever the
+prompt, and it is reported against a recency-weighted average of your recent
+sessions (`+3 vs recent`), or as `baseline recorded` on your first. An
+interrupted session shows how many words you completed and whether its
+observations were kept, and no speed: a partial prompt has no meaningful WPM.
+
+`typ stats` lists your recent completed sessions with their ids, gross WPM,
+speed on standard text, raw accuracy, and consistency; then your speed and
+raw accuracy over the last hundred probe words clear of recent targeted
+practice, marked `sustained improvement` or `sustained decline` only when
+the evidence separates them from the hundred before, with the probes that
+did overlap recent practice reported separately; the median time you took to
+start each word, session by session; and, for each pattern practised
+recently, how you type it in words that were used for that practice against
+words that were not. Then come the
+ten patterns you are slowest on relative to your baseline, the ten you most
+often get wrong, each with how much evidence is behind it, the ten weakest as
+mean ± uncertainty, and the candidates currently held back with the sessions
+remaining. Every statistic is a cache: `typ rebuild` recomputes all of them
+from your stored sessions, and an upgrade that changes the algorithm does so
+automatically. `typ replay <id>` shows how a stored session was interpreted:
+each word's first attempt, its own raw accuracy, and the patterns its errors
+count against, and which keystroke intervals count as clean motor evidence.
+`typ replay <id> --diff` instead runs the session through the current
+pipeline and lists every figure that differs from what was stored for it.
 
 ```
 $ typ --version
@@ -87,6 +108,7 @@ $ typ config profile laptop
 $ typ stats
 $ typ rebuild
 $ typ replay 12
+$ typ replay 12 --diff
 ```
 
 Set `NO_COLOR` to get bold and underline instead of colour. `Ctrl-C` or `Esc`

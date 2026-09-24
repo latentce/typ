@@ -171,6 +171,15 @@ impl TrainingHistory {
             .is_some_and(|last| last + sessions > self.sessions)
     }
 
+    /// Every pattern that was a target or exploration target in any of the
+    /// last `sessions` sessions recorded, in pattern order.
+    pub fn recently_practised(&self, sessions: usize) -> impl Iterator<Item = &str> {
+        self.patterns
+            .keys()
+            .map(AsRef::as_ref)
+            .filter(move |p| self.practised_within(p, sessions))
+    }
+
     /// Whether the word was shown as targeted in any of the last `sessions`
     /// sessions recorded.
     pub fn targeted_word_within(&self, word: &str, sessions: usize) -> bool {

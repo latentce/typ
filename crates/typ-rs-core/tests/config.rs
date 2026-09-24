@@ -72,6 +72,7 @@ fn the_defaults_are_the_documented_starting_points() {
     assert_eq!((config.long_word_length, config.length_penalty), (10, 0.2));
     assert_eq!(config.min_exposure_gap, 2);
     assert_eq!(config.contamination_sessions, 10);
+    assert_eq!(config.recent_half_life_sessions, 5.0);
 }
 
 #[test]
@@ -132,6 +133,7 @@ fn every_tunable_appears_by_name_in_the_json() {
         "length_penalty",
         "min_exposure_gap",
         "contamination_sessions",
+        "recent_half_life_sessions",
     ] {
         assert!(
             json.contains(&format!("\"{key}\":")),

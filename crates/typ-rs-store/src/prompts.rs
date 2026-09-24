@@ -7,7 +7,7 @@ use typ_rs_core::model::MODEL_VERSION;
 use typ_rs_core::prompt::Prompt;
 use typ_rs_core::scheduler::{SelectedTarget, TargetRole};
 
-use crate::{Error, Result};
+use crate::{Error, Result, json};
 
 /// What a prompt was composed for. A prompt composed ahead is shown only to
 /// a session with the same context; a changed setting, a new corpus, a new
@@ -153,6 +153,37 @@ pub(crate) fn load_targeted_words(conn: &Connection, prompt_id: i64) -> Result<V
     Ok(words)
 }
 
+/// Every word of the prompt as composed: its role, the targets it exposes,
+/// its selection score, and its contamination, in prompt order.
+pub(crate) fn load_words(conn: &Connection, prompt_id: i64) -> Result<Vec<ComposedWord>> {
+    let mut stmt = conn.prepare_cached(
+        "SELECT role, exposed_targets, selection_score, contamination
+         FROM prompt_words WHERE prompt_id = ?1 ORDER BY word_index",
+    )?;
+    let rows = stmt.query_map([prompt_id], |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, String>(1)?,
+            row.get::<_, Option<f64>>(2)?,
+            row.get::<_, Option<String>>(3)?,
+        ))
+    })?;
+    rows.map(|row| {
+        let (role, exposed, score, contamination) = row?;
+        Ok(ComposedWord {
+            role: WordRole::from_name(&role)
+                .ok_or_else(|| Error::Corrupt(format!("unknown word role {role:?}")))?,
+            exposed_targets: json::string_array(&exposed)?,
+            selection_score: score,
+            contamination: contamination
+                .as_deref()
+                .map(json::contamination)
+                .transpose()?,
+        })
+    })
+    .collect()
+}
+
 /// The patterns selected for a prompt, targets first in the order they
 /// were recorded.
 pub(crate) fn load_targets(conn: &Connection, prompt_id: i64) -> Result<Vec<SelectedTarget>> {
@@ -208,7 +239,21 @@ pub(crate) struct LoadedPrompt {
     pub id: i64,
     pub prompt: Prompt,
     pub targets: Vec<SelectedTarget>,
-    pub targeted_words: Vec<Box<str>>,
+    /// One entry per word, as composed.
+    pub words: Vec<ComposedWord>,
+}
+
+impl LoadedPrompt {
+    /// The words shown as targeted, in prompt order.
+    pub(crate) fn targeted_words(&self) -> Vec<Box<str>> {
+        self.prompt
+            .words()
+            .iter()
+            .zip(&self.words)
+            .filter(|(_, meta)| meta.role == WordRole::Targeted)
+            .map(|(word, _)| word.clone())
+            .collect()
+    }
 }
 
 pub(crate) fn load_prompt(conn: &Connection, prompt_id: i64) -> Result<LoadedPrompt> {
@@ -216,7 +261,7 @@ pub(crate) fn load_prompt(conn: &Connection, prompt_id: i64) -> Result<LoadedPro
         id: prompt_id,
         prompt: load(conn, prompt_id)?,
         targets: load_targets(conn, prompt_id)?,
-        targeted_words: load_targeted_words(conn, prompt_id)?,
+        words: load_words(conn, prompt_id)?,
     })
 }
 

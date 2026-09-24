@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use typ_rs_core::corpus::{Corpus, ReferenceDistribution, WordId};
+use typ_rs_core::corpus::{Corpus, REFERENCE_SAMPLE_WORDS, ReferenceDistribution, WordId};
 
 fn draw(seed: u64, n: usize) -> Vec<&'static str> {
     let corpus = Corpus::bundled();
@@ -59,4 +59,20 @@ fn sampling_follows_the_frequency_weights_not_the_raw_frequencies() {
         "only {} distinct words drawn",
         counts.len()
     );
+}
+
+#[test]
+fn the_fixed_reference_sample_is_the_same_thousand_words_every_time() {
+    let corpus = Corpus::bundled();
+    let reference = ReferenceDistribution::new(corpus);
+    let sample = reference.fixed_sample(corpus);
+    assert_eq!(sample.word_count(), REFERENCE_SAMPLE_WORDS);
+    assert_eq!(sample, reference.fixed_sample(corpus));
+    // Drawn from the distribution, not the rank list: common words repeat.
+    let the = sample
+        .words()
+        .iter()
+        .filter(|w| w.as_ref() == "the")
+        .count();
+    assert!(the > 5, "'the' appears {the} times");
 }

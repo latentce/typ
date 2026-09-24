@@ -32,16 +32,16 @@ pub use context::ContextModel;
 pub use weakness::{Weakness, WeaknessComponents};
 
 use crate::analysis::{HesitationThreshold, IntervalClass, SessionAnalysis, analyze_with, median};
-use crate::corpus::Corpus;
+use crate::corpus::{Corpus, ReferenceDistribution};
 use crate::layout::Layout;
-use crate::prompt::Slot;
+use crate::prompt::{Prompt, Slot};
 use crate::session::{EventKind, Outcome, SessionState};
 use context::{Aggregate, Coefficients, Features, slot_features};
 
 /// Identifies the analysis and scheduling algorithm. Bump whenever anything
 /// that feeds a cache changes; every cache is stamped with it and rebuilt
 /// from the stored sessions when it differs.
-pub const MODEL_VERSION: u32 = 4;
+pub const MODEL_VERSION: u32 = 5;
 
 /// The pattern text of the root of the chain: the user as a whole.
 pub const ROOT: &str = "";
@@ -183,6 +183,10 @@ pub struct SessionUpdate {
     /// `None` when the session's observations were not applied: an
     /// interrupted session with too few clean intervals.
     pub applied: Option<AppliedObservations>,
+    /// How the session's clean typing compared with what the model at its
+    /// start predicted. Only for a completed session with at least one
+    /// clean interval: an interrupted session reports no speed.
+    pub difficulty: Option<DifficultyAdjustment>,
 }
 
 /// The quantities a session's observations were measured against.
@@ -199,6 +203,39 @@ pub struct AppliedObservations {
     /// with: zero at or below the accuracy gate, one from its top.
     pub accuracy_factor: f64,
     pub clean_intervals: usize,
+}
+
+/// How a completed session's clean typing compared with the model's
+/// prediction for the very same slots, made from the model as it stood
+/// at session start with the session offset at zero: what the user would
+/// do on a typical day. Both sums run over the session's clean slots and
+/// no others, so the slots excluded from the motor estimate do not bias
+/// the comparison either way. The prompt's difficulty is in both sums, so
+/// the ratio is free of it; applied to the model's prediction for the
+/// fixed reference sample, it gives the speed the session translates to
+/// on standard text.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct DifficultyAdjustment {
+    /// Seconds the model predicted for the session's clean slots.
+    pub expected_clean_seconds: f64,
+    /// Seconds those slots actually took.
+    pub actual_clean_seconds: f64,
+    /// Words per minute the model predicted for the reference sample.
+    pub predicted_reference_wpm: f64,
+}
+
+impl DifficultyAdjustment {
+    /// How much faster (above one) or slower than predicted the session
+    /// was typed.
+    pub fn adjusted_ratio(&self) -> f64 {
+        self.expected_clean_seconds / self.actual_clean_seconds
+    }
+
+    /// The reference-equivalent WPM: the speed the user would have shown on
+    /// the reference sample, typing as they did this session.
+    pub fn reference_wpm(&self) -> f64 {
+        self.predicted_reference_wpm * self.adjusted_ratio()
+    }
 }
 
 impl ModelState {
@@ -326,6 +363,39 @@ impl ModelState {
         }
     }
 
+    /// The log-latency the model predicts for one slot of a prompt on a
+    /// typical day: the user baseline, the context effect of the slot's
+    /// own features, and the pattern effect of the pattern ending at it.
+    /// `None` until the model has a baseline.
+    pub fn predicted_log_latency(
+        &self,
+        prompt: &Prompt,
+        slot: Slot,
+        at: i64,
+        corpus: &Corpus,
+        config: &SchedulerConfig,
+    ) -> Option<f64> {
+        let baseline = self.user_baseline()?;
+        let pattern = prompt.pattern_ending_at(slot);
+        let features = slot_features(prompt, slot, self.layout, corpus);
+        Some(Predictor::new(self, baseline, at, config).log_latency(&pattern, &features))
+    }
+
+    /// The words per minute the model predicts for typing a prompt on a
+    /// typical day: its characters over the seconds predicted for every
+    /// slot but the first, whose incoming latency a session never
+    /// measures. `None` until the model has a baseline.
+    pub fn predicted_wpm(
+        &self,
+        prompt: &Prompt,
+        at: i64,
+        corpus: &Corpus,
+        config: &SchedulerConfig,
+    ) -> Option<f64> {
+        let baseline = self.user_baseline()?;
+        Some(Predictor::new(self, baseline, at, config).wpm(prompt, corpus))
+    }
+
     /// Enters a finished session that started at `started_at` (Unix seconds)
     /// into the model. Every pattern touched is decayed to `started_at`
     /// first, so what an observation adds depends on the time elapsed since
@@ -367,6 +437,7 @@ impl ModelState {
             return SessionUpdate {
                 analysis,
                 applied: None,
+                difficulty: None,
             };
         }
 
@@ -386,6 +457,23 @@ impl ModelState {
             median(&residuals, |a, b| (a + b) / 2.0).unwrap_or(0.0) * n
                 / (n + config.offset_regulariser)
         });
+        let difficulty = match baseline {
+            Some(baseline) if completed && !clean.is_empty() => {
+                let mut predictor = Predictor::new(self, baseline, started_at, config);
+                let expected_clean_seconds = clean
+                    .iter()
+                    .map(|c| predictor.log_latency(c.pattern, &c.features).exp())
+                    .sum();
+                let actual_clean_seconds = clean.iter().map(|c| c.log_latency.exp()).sum();
+                let sample = ReferenceDistribution::new(corpus).fixed_sample(corpus);
+                Some(DifficultyAdjustment {
+                    expected_clean_seconds,
+                    actual_clean_seconds,
+                    predicted_reference_wpm: predictor.wpm(&sample, corpus),
+                })
+            }
+            _ => None,
+        };
 
         let mut observer = Observer {
             model: self,
@@ -425,6 +513,7 @@ impl ModelState {
                 accuracy_factor,
                 clean_intervals,
             }),
+            difficulty,
         }
     }
 
@@ -474,6 +563,74 @@ struct CleanInterval<'a> {
     pattern: &'a str,
     log_latency: f64,
     features: Features,
+}
+
+/// Predicts latencies from a model as it stands, with the session offset at
+/// zero. A prompt of a thousand words repeats its patterns many times over,
+/// so each pattern's effect is worked out once.
+struct Predictor<'a> {
+    model: &'a ModelState,
+    baseline: f64,
+    at: i64,
+    config: &'a SchedulerConfig,
+    pattern_effects: BTreeMap<Box<str>, f64>,
+}
+
+impl<'a> Predictor<'a> {
+    fn new(
+        model: &'a ModelState,
+        baseline: f64,
+        at: i64,
+        config: &'a SchedulerConfig,
+    ) -> Predictor<'a> {
+        Predictor {
+            model,
+            baseline,
+            at,
+            config,
+            pattern_effects: BTreeMap::new(),
+        }
+    }
+
+    /// The predicted log-latency of a slot with the given pattern and
+    /// features.
+    fn log_latency(&mut self, pattern: &str, features: &Features) -> f64 {
+        let effect = match self.pattern_effects.get(pattern) {
+            Some(&effect) => effect,
+            None => {
+                let effect = self
+                    .model
+                    .estimate(pattern, self.at, self.config)
+                    .pattern_effect;
+                self.pattern_effects.insert(pattern.into(), effect);
+                effect
+            }
+        };
+        self.baseline + self.model.context.effect(features) + effect
+    }
+
+    /// The predicted words per minute for a prompt: its characters
+    /// (separating spaces included) over the seconds predicted for every
+    /// slot but the first.
+    fn wpm(&mut self, prompt: &Prompt, corpus: &Corpus) -> f64 {
+        let mut characters = 0usize;
+        let mut seconds = 0.0;
+        for slot in prompt.slots() {
+            characters += 1;
+            if slot
+                == (Slot {
+                    word: 0,
+                    position: 0,
+                })
+            {
+                continue;
+            }
+            let pattern = prompt.pattern_ending_at(slot);
+            let features = slot_features(prompt, slot, self.model.layout, corpus);
+            seconds += self.log_latency(&pattern, &features).exp();
+        }
+        characters as f64 / 5.0 / (seconds / 60.0)
+    }
 }
 
 /// How much a session's speed evidence counts: `clamp((raw − zero) / (full −

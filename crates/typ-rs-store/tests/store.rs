@@ -7,6 +7,7 @@ use tempfile::TempDir;
 use typ_rs_core::compose::{self, ComposedPrompt, ComposedWord, Contamination, WordRole};
 use typ_rs_core::corpus::{CORPUS_VERSION, Corpus};
 use typ_rs_core::layout::Layout;
+use typ_rs_core::metrics::{RecentSeries, summarize};
 use typ_rs_core::model::{MODEL_VERSION, ModelState, SchedulerConfig};
 use typ_rs_core::prompt::Prompt;
 use typ_rs_core::scheduler::{
@@ -14,7 +15,8 @@ use typ_rs_core::scheduler::{
 };
 use typ_rs_core::session::{EndCondition, Input, Key, Outcome, SessionState};
 use typ_rs_store::{
-    DEFAULT_PROFILE, DEFAULT_WORDS, Error, Profile, SessionId, SessionStart, Store, parse_words,
+    DEFAULT_PROFILE, DEFAULT_WORDS, Error, Profile, SessionEnd, SessionId, SessionStart, Store,
+    parse_words,
 };
 
 const SOURCE_OF_TRUTH: &[&str] = &[
@@ -27,7 +29,12 @@ const SOURCE_OF_TRUTH: &[&str] = &[
     "input_events",
 ];
 
-const CACHES: &[&str] = &["pattern_stats", "context_model", "pattern_training_events"];
+const CACHES: &[&str] = &[
+    "pattern_stats",
+    "context_model",
+    "pattern_training_events",
+    "session_metrics",
+];
 
 fn temp_db() -> (TempDir, std::path::PathBuf) {
     let dir = tempfile::tempdir().unwrap();
@@ -112,8 +119,9 @@ fn typed(prompt: Prompt, script: &str) -> SessionState {
 }
 
 /// Ends a session the way the binary does: the model is loaded, the session
-/// applied to it, the achieved doses of the session's targets computed, and
-/// everything handed to the store with the next prompt.
+/// applied to it, the achieved doses of the session's targets computed, the
+/// session summarised against the recent series, and everything handed to
+/// the store with the next prompt.
 fn finish(
     store: &mut Store,
     profile: &Profile,
@@ -134,10 +142,28 @@ fn finish_with(
     next: ComposedPrompt,
 ) -> typ_rs_store::Result<()> {
     let mut model = store.model(profile).unwrap();
-    model.apply_session(state, started_at, Corpus::bundled(), store.config());
-    let targets = store.session(id).unwrap().targets;
-    let events = achieved_doses(state, &targets);
-    store.finish_session(id, state, &model, &events, &next, started_at + 60)
+    let update = model.apply_session(state, started_at, Corpus::bundled(), store.config());
+    let session = store.session(id).unwrap();
+    let events = achieved_doses(state, &session.targets);
+    let recent = store.recent_series(profile).unwrap();
+    let summary = summarize(
+        state,
+        &update,
+        &session.words,
+        recent.as_ref(),
+        store.config(),
+    );
+    store.finish_session(
+        id,
+        &SessionEnd {
+            state,
+            model: &model,
+            events: &events,
+            summary: summary.as_ref(),
+            next_prompt: &next,
+            ended_at: started_at + 60,
+        },
+    )
 }
 
 /// Runs a whole session through the store: start, type the script, finish
@@ -217,7 +243,7 @@ fn opening_an_empty_file_runs_the_migrations_and_creates_the_default_profile() {
         .unwrap()
         .collect::<Result<_, _>>()
         .unwrap();
-    assert_eq!(versions, vec![1, 2, 3, 4, 5]);
+    assert_eq!(versions, vec![1, 2, 3, 4, 5, 6]);
 
     let tables: Vec<String> = conn
         .prepare("SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name")
@@ -256,7 +282,7 @@ fn reopening_does_not_rerun_migrations_or_duplicate_the_default_profile() {
     let profiles: i64 = conn
         .query_row("SELECT count(*) FROM profiles", [], |r| r.get(0))
         .unwrap();
-    assert_eq!((migrations, profiles), (5, 1));
+    assert_eq!((migrations, profiles), (6, 1));
 }
 
 #[test]
@@ -785,7 +811,17 @@ fn the_model_read_back_is_the_one_written_and_grows_with_each_session() {
     let mut model = store.model(&profile).unwrap();
     model.apply_session(&state, 1_000, Corpus::bundled(), store.config());
     store
-        .finish_session(id, &state, &model, &[], &probes("next"), 1_060)
+        .finish_session(
+            id,
+            &SessionEnd {
+                state: &state,
+                model: &model,
+                events: &[],
+                summary: None,
+                next_prompt: &probes("next"),
+                ended_at: 1_060,
+            },
+        )
         .unwrap();
     model.mark_clean();
 
@@ -1379,9 +1415,10 @@ fn a_targeted_history_rebuilds_to_identical_caches() {
             let text = prompt.text();
             let state = typed(prompt, &text);
             let mut model = store.model(&profile).unwrap();
-            model.apply_session(&state, started_at, corpus, store.config());
+            let update = model.apply_session(&state, started_at, corpus, store.config());
+            let session = store.session(id).unwrap();
             let mut history = store.training_history(&profile).unwrap();
-            let events = scheduler::achieved_doses(&state, &store.session(id).unwrap().targets);
+            let events = scheduler::achieved_doses(&state, &session.targets);
             history.record(&events, [], store.config());
             let next = compose::next_prompt(
                 &model,
@@ -1392,8 +1429,26 @@ fn a_targeted_history_rebuilds_to_identical_caches() {
                 30,
                 i as u64,
             );
+            let recent = store.recent_series(&profile).unwrap();
+            let summary = summarize(
+                &state,
+                &update,
+                &session.words,
+                recent.as_ref(),
+                store.config(),
+            );
             store
-                .finish_session(id, &state, &model, &events, &next, started_at + 60)
+                .finish_session(
+                    id,
+                    &SessionEnd {
+                        state: &state,
+                        model: &model,
+                        events: &events,
+                        summary: summary.as_ref(),
+                        next_prompt: &next,
+                        ended_at: started_at + 60,
+                    },
+                )
                 .unwrap();
             (id, prompt) = start_with(&mut store, &profile, started_at + 86_400, 30, "unused");
         }
@@ -1401,6 +1456,7 @@ fn a_targeted_history_rebuilds_to_identical_caches() {
     let truth_before = dump(&path);
     let caches_before = dump_tables(&path, CACHES);
     assert!(caches_before["pattern_training_events"].len() >= 4);
+    assert_eq!(caches_before["session_metrics"].len(), 5);
     let targets: i64 = sql_one(&path, "SELECT count(*) FROM prompt_targets");
     assert!(targets >= 4, "{targets}");
 
@@ -1440,4 +1496,138 @@ fn training_events_from_another_model_version_alone_trigger_a_rebuild() {
     let (store, _) = open(&path);
     drop(store);
     assert_eq!(dump_tables(&path, CACHES), caches_before);
+}
+
+// --- Session summaries -----------------------------------------------------------
+
+#[test]
+fn a_completed_session_caches_its_summary_and_an_interrupted_one_does_not() {
+    let (_dir, path) = temp_db();
+    let (mut store, profile) = open(&path);
+    assert_eq!(store.recent_series(&profile).unwrap(), None);
+
+    let (completed, _) = type_session(&mut store, &profile, 1_000, "cat dog", "cat dog", "fox");
+    let summary = store.session(completed).unwrap().summary.unwrap();
+    assert_eq!(summary.gross_wpm, Some(140.0));
+    assert_eq!(summary.raw_accuracy, 1.0);
+    assert!(summary.reference_wpm.is_some());
+    // The first completed session is its own baseline.
+    assert_eq!(summary.recent.wpm, summary.gross_wpm);
+    assert_eq!(summary.recent.reference_wpm, summary.reference_wpm);
+    assert_eq!(store.recent_series(&profile).unwrap(), Some(summary.recent));
+    let (rows, version): (i64, i64) = Connection::open(&path)
+        .unwrap()
+        .query_row(
+            "SELECT count(*), max(model_version) FROM session_metrics",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!((rows, version), (1, i64::from(MODEL_VERSION)));
+
+    let (interrupted, _) = type_session(&mut store, &profile, 2_000, "cat dog", "ca⎋", "fox");
+    assert_eq!(store.session(interrupted).unwrap().summary, None);
+    let rows: i64 = sql_one(&path, "SELECT count(*) FROM session_metrics");
+    assert_eq!(rows, 1);
+    assert_eq!(store.recent_series(&profile).unwrap(), Some(summary.recent));
+}
+
+#[test]
+fn the_recent_series_advances_with_each_completed_session() {
+    let (_dir, path) = temp_db();
+    let (mut store, profile) = open(&path);
+    let (first, _) = type_session(&mut store, &profile, 1_000, "cat dog", "cat dog", "fox");
+    // Twice as fast the second time.
+    let (id, prompt) = start(&mut store, &profile, 2_000, "cat dog");
+    let mut state = SessionState::new(prompt, EndCondition::AfterWords(2));
+    for (i, c) in "cat dog".chars().enumerate() {
+        state.apply_event(Input::new(i as u64 * 50_000, Key::Char(c)));
+    }
+    finish(&mut store, &profile, id, 2_000, &state, "fox").unwrap();
+
+    let first = store.session(first).unwrap().summary.unwrap();
+    let second = store.session(id).unwrap().summary.unwrap();
+    assert_eq!(second.gross_wpm, Some(280.0));
+    let expected = first.recent.advanced(
+        &RecentSeries {
+            wpm: second.gross_wpm,
+            adjusted_ratio: second.adjusted_ratio,
+            reference_wpm: second.reference_wpm,
+        },
+        store.config().recent_half_life_sessions,
+    );
+    assert_eq!(second.recent, expected);
+    assert!(second.recent.wpm.unwrap() > 140.0 && second.recent.wpm.unwrap() < 280.0);
+    assert_eq!(store.recent_series(&profile).unwrap(), Some(second.recent));
+}
+
+#[test]
+fn a_prompts_words_read_back_with_their_roles_and_contamination() {
+    let (_dir, path) = temp_db();
+    let (mut store, profile) = open(&path);
+    let composed = targeted("cat dog the");
+    let started = store
+        .start_session(
+            &profile,
+            SessionStart {
+                started_at: 1_000,
+                seed: 1,
+                word_count: 3,
+            },
+            || composed.clone(),
+        )
+        .unwrap();
+    assert_eq!(started.words, composed.words);
+    assert_eq!(store.session(started.id).unwrap().words, composed.words);
+
+    // Typed and summarised: "dog" is the one contaminated probe, "the" the
+    // one clear of practice.
+    let state = typed(started.prompt, "cat dog the");
+    finish(&mut store, &profile, started.id, 1_000, &state, "next").unwrap();
+    let summary = store.session(started.id).unwrap().summary.unwrap();
+    assert_eq!(summary.probes.words, 1);
+    assert_eq!(summary.contaminated_probes.words, 1);
+}
+
+#[test]
+fn session_metrics_from_another_model_version_alone_trigger_a_rebuild() {
+    let (_dir, path) = temp_db();
+    {
+        let (mut store, profile) = open(&path);
+        type_history(&mut store, &profile);
+    }
+    let caches_before = dump_tables(&path, CACHES);
+    assert_eq!(caches_before["session_metrics"].len(), 2);
+    sql(
+        &path,
+        "UPDATE session_metrics SET model_version = model_version + 1, gross_wpm = 999",
+    );
+    assert_ne!(dump_tables(&path, CACHES), caches_before);
+
+    let (store, _) = open(&path);
+    drop(store);
+    assert_eq!(dump_tables(&path, CACHES), caches_before);
+}
+
+#[test]
+fn recomputing_a_summary_through_the_current_pipeline_reproduces_the_cached_one() {
+    let (_dir, path) = temp_db();
+    let (mut store, profile) = open(&path);
+    type_history(&mut store, &profile);
+
+    for id in 1..=4 {
+        let id = SessionId::from_str(&id.to_string()).unwrap();
+        let session = store.session(id).unwrap();
+        let recomputed = store.recompute_summary(id).unwrap();
+        assert_eq!(recomputed.stored, session.summary, "{id}");
+        assert_eq!(recomputed.current, session.summary, "{id}");
+        assert_eq!(
+            recomputed.current.is_some(),
+            session.outcome == Outcome::Completed,
+            "{id}"
+        );
+    }
+    // Nothing was written.
+    let caches = dump_tables(&path, CACHES);
+    assert_eq!(caches["session_metrics"].len(), 2);
 }
