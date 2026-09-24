@@ -9,7 +9,7 @@ fn the_default_config_round_trips_through_json() {
 }
 
 #[test]
-fn the_defaults_are_the_documented_starting_points() {
+fn the_defaults_are_the_documented_values() {
     let config = SchedulerConfig::default();
     assert_eq!(config.pattern_half_life_days, 45.0);
     assert_eq!(config.baseline_half_life_days, 7.0);
@@ -163,6 +163,35 @@ fn a_missing_tunable_takes_its_default_and_an_unknown_one_is_ignored() {
         read.pattern_half_life_days,
         SchedulerConfig::default().pattern_half_life_days
     );
+}
+
+#[test]
+fn a_tunable_can_be_set_by_name() {
+    let mut config = SchedulerConfig::default();
+    config.set("kappa", 4.0).unwrap();
+    config.set("dose", 8.0).unwrap();
+    assert_eq!(config.kappa, 4.0);
+    assert_eq!(config.dose, 8);
+    assert!(config.set("dose", 2.5).is_err());
+    assert!(config.set("dose", -1.0).is_err());
+    assert!(config.set("humidity", 0.7).is_err());
+    assert_eq!(config.dose, 8);
+}
+
+#[test]
+fn the_listed_tunables_are_the_json_members_with_their_values() {
+    let config = SchedulerConfig {
+        kappa: 3.0,
+        ..SchedulerConfig::default()
+    };
+    let listed: Vec<(&str, f64)> = config.tunables().collect();
+    assert!(listed.contains(&("kappa", 3.0)));
+    assert!(listed.contains(&("dose", 6.0)));
+    let json = config.to_json();
+    for (name, _) in &listed {
+        assert!(json.contains(&format!("\"{name}\":")), "{name}");
+    }
+    assert_eq!(listed.len(), json.matches(':').count());
 }
 
 #[test]

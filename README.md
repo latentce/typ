@@ -149,6 +149,11 @@ The terminal loop itself is checked by hand; see
 at a different database directory, so that experiments do not touch your own
 history.
 
+The scheduler is checked against synthetic learners by the simulator; see
+[`docs/simulator.md`](docs/simulator.md). `just sim` runs it, and
+`just sim-gate` runs its integration tests with optimisations on, which is
+how the end-of-session timing budget is meant to be asserted.
+
 The workspace has four crates:
 
 - `crates/typ-rs-core`: session state machine, analysis, model, scheduler, word
@@ -156,7 +161,7 @@ The workspace has four crates:
 - `crates/typ-rs-store`: SQLite persistence, migrations, and rebuild.
 - `crates/typ-rs`: the `typ` binary (terminal and CLI).
 - `crates/typ-sim`: a simulator that drives the same pipeline with synthetic
-  learners.
+  learners, never published.
 
 The corpus is compiled in from `crates/typ-rs-core/corpus/1grams_english.csv` and derived at
 startup; editing that file or the filter rules in `typ-rs-core` is a corpus

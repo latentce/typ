@@ -107,7 +107,7 @@ pub fn eligible_patterns(corpus: &Corpus, config: &SchedulerConfig) -> Vec<Eligi
 }
 
 /// What has happened to one pattern over a profile's sessions.
-#[derive(Debug, Clone, Copy, PartialEq, Default)]
+#[derive(Debug, Clone, PartialEq, Default)]
 pub struct PatternHistory {
     /// Sessions still to come in which the pattern stays out of candidacy.
     pub deferral_remaining: usize,
@@ -115,8 +115,9 @@ pub struct PatternHistory {
     pub sessions_practised: usize,
     /// Exposures typed across every session it was practised in.
     pub achieved_dose: usize,
-    /// Its weakness mean when it was first practised.
-    pub first_weakness_mean: Option<f64>,
+    /// Its weakness mean at selection in each session it was practised
+    /// in, in order.
+    pub practised_means: Vec<f64>,
     /// The ordinal (from one) of the last session it was practised in.
     pub last_practised: Option<usize>,
 }
@@ -218,7 +219,7 @@ impl TrainingHistory {
                 TargetRole::Target | TargetRole::Explore => {
                     h.sessions_practised += 1;
                     h.achieved_dose += event.achieved_dose;
-                    h.first_weakness_mean.get_or_insert(t.weakness_mean);
+                    h.practised_means.push(t.weakness_mean);
                     h.last_practised = Some(session);
                 }
             }
@@ -231,8 +232,13 @@ impl TrainingHistory {
     /// How much a pattern's priority is scaled for having plateaued: one
     /// unless it has been practised in enough sessions with enough dose and
     /// its weakness mean has moved less than its current uncertainty since
-    /// it was first practised; then the plateau factor, recovering linearly
-    /// to one over the configured number of untargeted sessions.
+    /// the selection `plateau_min_sessions` practised sessions ago; then
+    /// the plateau factor, recovering linearly to one over the configured
+    /// number of untargeted sessions. The comparison looks back over the
+    /// practice window rather than to the first selection because a
+    /// pattern's first estimate is its noisiest, shrunk toward its parent
+    /// before it has evidence of its own: a pattern that is truly weak and
+    /// never changes still drifts away from it as evidence arrives.
     pub fn plateau_factor(
         &self,
         pattern: &str,
@@ -243,12 +249,21 @@ impl TrainingHistory {
         let Some(h) = self.pattern(pattern) else {
             return 1.0;
         };
-        let (Some(first), Some(last)) = (h.first_weakness_mean, h.last_practised) else {
+        let Some(last) = h.last_practised else {
+            return 1.0;
+        };
+        let window = config.plateau_min_sessions.max(1);
+        let Some(&reference) = h
+            .practised_means
+            .len()
+            .checked_sub(window)
+            .and_then(|i| h.practised_means.get(i))
+        else {
             return 1.0;
         };
         let plateaued = h.sessions_practised >= config.plateau_min_sessions
             && h.achieved_dose > config.plateau_min_dose
-            && (weakness_mean - first).abs() < weakness_sd;
+            && (weakness_mean - reference).abs() < weakness_sd;
         if !plateaued {
             return 1.0;
         }

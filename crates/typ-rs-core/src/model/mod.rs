@@ -41,7 +41,7 @@ use context::{Aggregate, Coefficients, Features, slot_features};
 /// Identifies the analysis and scheduling algorithm. Bump whenever anything
 /// that feeds a cache changes; every cache is stamped with it and rebuilt
 /// from the stored sessions when it differs.
-pub const MODEL_VERSION: u32 = 5;
+pub const MODEL_VERSION: u32 = 6;
 
 /// The pattern text of the root of the chain: the user as a whole.
 pub const ROOT: &str = "";
@@ -686,10 +686,7 @@ impl Observer<'_> {
             }
             let len = word.target.chars().count();
             let has_space_slot = index + 1 < state.word_count() || ended_on_space;
-            let mut error_mass: BTreeMap<usize, f64> = BTreeMap::new();
-            for error in &word.errors {
-                *error_mass.entry(error.edit.slot()).or_default() += error.weight;
-            }
+            let error_mass = word.error_mass();
             let slots =
                 (0..len).chain((has_space_slot || error_mass.contains_key(&len)).then_some(len));
             for position in slots {

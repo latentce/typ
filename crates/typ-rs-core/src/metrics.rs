@@ -182,7 +182,7 @@ pub fn word_performances(
 /// Whether a word was left with a space: every submitted word but the last,
 /// and the last when the session ended on a space rather than on its final
 /// character.
-fn space_typed(analysis: &SessionAnalysis, index: usize) -> bool {
+pub fn space_typed(analysis: &SessionAnalysis, index: usize) -> bool {
     analysis.words[index].submitted
         && (index + 1 < analysis.words.len()
             || analysis
@@ -466,10 +466,7 @@ pub fn accumulate_transfer(
             continue;
         }
         let len = word.target.chars().count();
-        let mut error_mass: BTreeMap<usize, f64> = BTreeMap::new();
-        for error in &word.errors {
-            *error_mass.entry(error.edit.slot()).or_default() += error.weight;
-        }
+        let error_mass = word.error_mass();
         let has_space_slot = space_typed(analysis, index) || error_mass.contains_key(&len);
         let slots = (0..len).chain(has_space_slot.then_some(len));
         for position in slots {

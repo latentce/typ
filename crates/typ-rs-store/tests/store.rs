@@ -1363,7 +1363,7 @@ fn the_training_history_replays_the_sessions_and_optionally_the_waiting_prompt()
     assert_eq!(showing.deferrals().collect::<Vec<_>>(), vec![("og", 1)]);
     let at = history.pattern("at").unwrap();
     assert_eq!((at.sessions_practised, at.achieved_dose), (1, 2));
-    assert_eq!(at.first_weakness_mean, Some(0.5));
+    assert_eq!(at.practised_means, vec![0.5]);
     // The second session's prompt showed "cat" as targeted; the waiting
     // prompt's probes-only words add nothing.
     assert!(history.targeted_word_within("cat", 1));

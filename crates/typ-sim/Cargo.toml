@@ -7,9 +7,13 @@ license.workspace = true
 rust-version.workspace = true
 publish = false
 
+[lib]
+path = "src/lib.rs"
+
 [[bin]]
 name = "typ-sim"
 path = "src/main.rs"
 
 [dependencies]
 typ-rs-core = { workspace = true }
+clap = { workspace = true }

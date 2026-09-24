@@ -34,6 +34,14 @@ check:
     cargo clippy --workspace --all-targets -- -D warnings
     cargo test --workspace
 
+# Run the simulator (release); extra arguments are passed through, e.g. --learner awkward
+sim *args:
+    cargo run -q --release -p typ-sim -- {{ args }}
+
+# Run the simulator's integration tests with optimisations on
+sim-gate:
+    cargo test --release -p typ-sim
+
 # Build and open the API docs for the workspace crates
 doc:
     cargo doc --no-deps --workspace --open

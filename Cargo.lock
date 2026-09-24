@@ -664,6 +664,7 @@ dependencies = [
 name = "typ-sim"
 version = "0.1.0"
 dependencies = [
+ "clap",
  "typ-rs-core",
 ]
 

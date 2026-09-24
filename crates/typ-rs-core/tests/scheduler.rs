@@ -431,6 +431,31 @@ fn a_target_plateaus_after_enough_practice_without_change_and_recovers_when_unta
     assert_eq!(history.plateau_factor("th", 0.5, 0.1, &config), 1.0);
 }
 
+/// A pattern's first estimate is its noisiest: shrunk toward its parent
+/// before it has evidence of its own. A pattern that is truly weak and
+/// never changes moves away from that first estimate as evidence arrives,
+/// so the plateau check looks back only as far as the practice window.
+#[test]
+fn a_plateau_is_judged_against_the_weakness_when_the_practice_window_began() {
+    let config = config();
+    let mut history = TrainingHistory::new();
+    let practised_at = |history: &mut TrainingHistory, mean: f64| {
+        let mut e = event("th", TargetRole::Target, 6);
+        e.target.weakness_mean = mean;
+        history.record(&[e], [], &config);
+    };
+    // Shrunk first estimates, then settled ones.
+    for mean in [0.3, 0.6, 0.9, 1.0, 1.0] {
+        practised_at(&mut history, mean);
+    }
+    // The window of four practised sessions began at 0.6: a change.
+    assert_eq!(history.plateau_factor("th", 1.0, 0.1, &config), 1.0);
+    practised_at(&mut history, 1.0);
+    // Now it began at 0.9: within an uncertainty of 0.15, not of 0.05.
+    assert_eq!(history.plateau_factor("th", 1.0, 0.15, &config), 0.5);
+    assert_eq!(history.plateau_factor("th", 1.0, 0.05, &config), 1.0);
+}
+
 #[test]
 fn a_deferral_window_runs_down_with_every_session_even_one_that_selected_nothing() {
     let config = config();
@@ -454,7 +479,7 @@ fn an_exploration_session_counts_as_practice_and_a_deferral_does_not() {
     history.record(&[event("th", TargetRole::Deferred, 3)], [], &config);
     let h = history.pattern("th").unwrap();
     assert_eq!((h.sessions_practised, h.achieved_dose), (1, 4));
-    assert_eq!(h.first_weakness_mean, Some(0.5));
+    assert_eq!(h.practised_means, vec![0.5]);
     assert_eq!(h.last_practised, Some(1));
     assert_eq!(history.sessions(), 2);
 }

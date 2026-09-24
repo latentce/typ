@@ -14,6 +14,7 @@ mod alignment;
 mod attempt;
 mod intervals;
 
+use std::collections::BTreeMap;
 use std::fmt;
 
 use crate::metrics;
@@ -63,6 +64,17 @@ impl WordAnalysis {
     /// characters are reduced by for raw accuracy.
     pub fn error_count(&self) -> f64 {
         self.errors.iter().map(|e| e.weight).sum()
+    }
+
+    /// The error weight attributed to each slot of the word, by position;
+    /// the position just past the end is the following space. Uncapped: a
+    /// slot with two errors against it carries two.
+    pub fn error_mass(&self) -> BTreeMap<usize, f64> {
+        let mut mass: BTreeMap<usize, f64> = BTreeMap::new();
+        for error in &self.errors {
+            *mass.entry(error.edit.slot()).or_default() += error.weight;
+        }
+        mass
     }
 
     /// The word's own raw accuracy: first-attempt correct characters over

@@ -168,7 +168,11 @@ fn target(pattern: &str, role: TargetRole, priority: f64) -> SelectedTarget {
         weakness_mean: 0.5,
         weakness_sd: 0.2,
         priority,
-        planned_dose: if role == TargetRole::Deferred { 0 } else { 6 },
+        planned_dose: if role == TargetRole::Deferred {
+            0
+        } else {
+            SchedulerConfig::default().dose
+        },
     }
 }
 

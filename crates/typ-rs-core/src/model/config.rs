@@ -4,7 +4,13 @@ use std::fmt;
 
 /// The tunables of the model. One structure holds them all so that a
 /// session can record what produced it and a simulator can vary them
-/// without code changes. The defaults are starting points, not tuned values.
+/// without code changes. The defaults were checked against simulated
+/// learners with a known weakness: the shrinkage strength and the variance
+/// cap sit on a trade-off, where lowering either makes the scheduler
+/// re-target a found weakness more consistently at the price of taking
+/// longer to find one whose parent character is typed well; a larger dose
+/// or a warmer word draw gives a found weakness more exposures but no
+/// longer lets every target reach its dose in a 50-word prompt.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct SchedulerConfig {
     /// Half-life in days of a pattern's statistics.
@@ -473,20 +479,38 @@ impl SchedulerConfig {
     pub fn from_json(json: &str) -> Result<SchedulerConfig, ConfigError> {
         let mut config = SchedulerConfig::default();
         for (name, value) in parse_flat_object(json)? {
-            let Some(tunable) = TUNABLES.iter().find(|t| t.name == name) else {
+            if !TUNABLES.iter().any(|t| t.name == name) {
                 continue;
-            };
+            }
             let number: f64 = value
                 .parse()
                 .map_err(|_| ConfigError(format!("{name}: {value:?} is not a number")))?;
-            if tunable.whole_number && (number < 0.0 || number.fract() != 0.0) {
-                return Err(ConfigError(format!(
-                    "{name}: {value} is not a whole number"
-                )));
-            }
-            (tunable.set)(&mut config, number);
+            config.set(&name, number)?;
         }
         Ok(config)
+    }
+
+    /// Every tunable by its JSON member name with its current value, in
+    /// member order.
+    pub fn tunables(&self) -> impl Iterator<Item = (&'static str, f64)> + '_ {
+        TUNABLES.iter().map(|t| (t.name, (t.get)(self)))
+    }
+
+    /// Sets one tunable by its JSON member name. A name this version does
+    /// not know, or a count given a fractional or negative value, is an
+    /// error and changes nothing.
+    pub fn set(&mut self, name: &str, value: f64) -> Result<(), ConfigError> {
+        let tunable = TUNABLES
+            .iter()
+            .find(|t| t.name == name)
+            .ok_or_else(|| ConfigError(format!("{name} is not a tunable")))?;
+        if tunable.whole_number && (value < 0.0 || value.fract() != 0.0) {
+            return Err(ConfigError(format!(
+                "{name}: {value} is not a whole number"
+            )));
+        }
+        (tunable.set)(self, value);
+        Ok(())
     }
 }
 
