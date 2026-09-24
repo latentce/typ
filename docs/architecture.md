@@ -167,7 +167,7 @@ any of it.
 
 | Variable | Effect |
 | --- | --- |
-| `TYP_DATA_DIR` | Directory for `typ.db`. Use a scratch one while developing. |
+| `TYP_DATA_DIR` | Directory for `typ.db`. Without it, an optimized build uses the platform data directory and a debug build `target/typ-data` in its source tree, so developing never touches an installation's data. |
 | `NO_COLOR` | Bold and underline instead of color. |
 | `TYP_DIAGNOSTICS` | Print render timing per input batch to stderr after the results. |
 | `TYP_PANIC_AFTER=n` | Panic after `n` keystrokes, to test terminal restoration. Debug builds only. |

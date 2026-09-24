@@ -11,11 +11,12 @@ it, and the bug is in the raw-mode guard.
 Setup:
 
 ```
-export TYP_DATA_DIR=/tmp/typ-smoke    # keep these sessions out of your history
 just build
 ```
 
-The steps use `just run`, which runs the debug binary.
+The steps use `just run`, which runs the debug binary. A debug build keeps
+its database at `target/typ-data/typ.db`, so these sessions never enter your
+own history. To start from nothing, `rm -r target/typ-data` first.
 
 1. **Start.** `just run`. The prompt appears in muted gray directly below the
    command with the terminal's cursor, now a steady thin bar, before its
@@ -69,8 +70,8 @@ The steps use `just run`, which runs the debug binary.
 12. **Not a terminal.** `just run < /dev/null` refuses with a one-line
     message.
 13. **Stats during a session.** `just run` in one terminal and, while it is
-    waiting for input, `just run stats` in another (with the same
-    `TYP_DATA_DIR`). The listing shows the sessions completed above, most
+    waiting for input, `just run stats` in another (from the same
+    checkout). The listing shows the sessions completed above, most
     recent first, followed by the slowest, most error-prone, and weakest
     patterns so far (the last as `mean ± sd`) and, once the scheduler has
     held some candidates back, `deferred candidates` with the sessions

@@ -121,11 +121,12 @@ algorithm.
 | Variable | Effect |
 | --- | --- |
 | `NO_COLOR` | Bold and underline instead of color. |
-| `TYP_DATA_DIR` | Use this directory for the database instead of the platform default. |
+| `TYP_DATA_DIR` | Use this directory for the database instead of the default. |
 
 Data lives in one file: `~/.local/share/typ/typ.db` on Linux,
 `~/Library/Application Support/typ/typ.db` on macOS, `%APPDATA%\typ\typ.db`
-on Windows.
+on Windows. That is for an installed `typ`; a debug build keeps its own file
+under `target/typ-data` in its source tree (see [Developing](#developing)).
 
 ## Developing
 
@@ -147,11 +148,14 @@ You need a Rust toolchain and [`just`](https://github.com/casey/just).
 
 Aliases: `just r`, `b`, `t`, `c` for run, build, test, check.
 
-Point `TYP_DATA_DIR` at a scratch directory while developing so experiments
-stay out of your own history:
+A debug build never touches your own history: unless `TYP_DATA_DIR` is set,
+it keeps its database at `target/typ-data/typ.db` in the checkout, separate
+from the installed `typ`'s. `cargo clean` removes it. A release build
+(`just release`, `./target/release/typ`) uses the same directory as an
+installed `typ`, so point it elsewhere if you run one by hand:
 
 ```
-TYP_DATA_DIR=/tmp/typ-dev just run
+TYP_DATA_DIR=/tmp/typ-dev ./target/release/typ
 ```
 
 ### Where things live

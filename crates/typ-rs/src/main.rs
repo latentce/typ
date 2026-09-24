@@ -420,15 +420,35 @@ fn open_profile(store: &mut Store, name: Option<&str>) -> Result<Profile, Box<dy
     Ok(store.profile_or_create(&name)?)
 }
 
-/// `$TYP_DATA_DIR` if set, otherwise `typ` under the platform's data
-/// directory (`~/.local/share` on Linux).
+/// `$TYP_DATA_DIR` if set, otherwise the build's default directory.
 fn data_dir() -> Result<PathBuf, String> {
     if let Some(dir) = std::env::var_os("TYP_DATA_DIR").filter(|d| !d.is_empty()) {
         return Ok(PathBuf::from(dir));
     }
+    default_data_dir()
+}
+
+/// `typ` under the platform's data directory (`~/.local/share` on Linux).
+/// `cargo install` builds with optimizations, so this is where an installed
+/// `typ` keeps its data.
+#[cfg(not(debug_assertions))]
+fn default_data_dir() -> Result<PathBuf, String> {
     dirs::data_dir()
         .map(|d| d.join("typ"))
         .ok_or_else(|| "could not determine the data directory; set TYP_DATA_DIR".to_string())
+}
+
+/// `target/typ-data` in the source tree the binary was built from, so that a
+/// binary run while developing never opens, and never migrates, the database
+/// of an installed `typ`. `cargo clean` removes it with the rest of the
+/// build.
+#[cfg(debug_assertions)]
+fn default_data_dir() -> Result<PathBuf, String> {
+    let workspace = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .ancestors()
+        .nth(2)
+        .ok_or_else(|| "could not locate the workspace root; set TYP_DATA_DIR".to_string())?;
+    Ok(workspace.join("target").join("typ-data"))
 }
 
 fn render_diagnostics(render_micros: &[u64]) -> String {
@@ -450,6 +470,21 @@ mod tests {
     use typ_rs_core::prompt::Prompt;
     use typ_rs_core::session::{Input, Key};
     use typ_rs_store::DEFAULT_PROFILE;
+
+    #[test]
+    #[cfg(debug_assertions)]
+    fn a_debug_build_keeps_its_data_in_the_source_tree() {
+        let dir = default_data_dir().unwrap();
+        assert!(dir.ends_with("target/typ-data"), "{}", dir.display());
+        assert!(
+            dir.parent()
+                .unwrap()
+                .parent()
+                .unwrap()
+                .join("Cargo.toml")
+                .is_file()
+        );
+    }
 
     #[test]
     fn render_diagnostics_summarize_the_batches() {
