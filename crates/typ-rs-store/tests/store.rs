@@ -6,6 +6,7 @@ use rusqlite::Connection;
 use tempfile::TempDir;
 use typ_rs_core::compose::{self, ComposedPrompt, ComposedWord, Contamination, WordRole};
 use typ_rs_core::corpus::{CORPUS_VERSION, Corpus};
+use typ_rs_core::display::{CursorShape, CursorStyle};
 use typ_rs_core::layout::Layout;
 use typ_rs_core::metrics::{RecentSeries, summarize};
 use typ_rs_core::model::{MODEL_VERSION, ModelState, SchedulerConfig};
@@ -419,8 +420,65 @@ fn settings_have_their_defaults_before_anything_is_set() {
     let (store, profile) = open(&path);
     assert_eq!(store.active_profile().unwrap(), DEFAULT_PROFILE);
     assert_eq!(store.words(&profile).unwrap(), DEFAULT_WORDS);
+    assert_eq!(store.cursor().unwrap(), CursorStyle::default());
     assert_eq!(profile.layout, "qwerty");
     assert_eq!(profile.mode, "words");
+}
+
+#[test]
+fn the_cursor_settings_round_trip_and_belong_to_the_whole_database() {
+    let (_dir, path) = temp_db();
+    {
+        let (mut store, _) = open(&path);
+        store.set_cursor_shape("block").unwrap();
+        store.set_cursor_blink("on").unwrap();
+        store.set_cursor_shape("underline").unwrap();
+    }
+    let (store, _) = open(&path);
+    assert_eq!(
+        store.cursor().unwrap(),
+        CursorStyle {
+            shape: CursorShape::Underline,
+            blink: true
+        }
+    );
+    let scoped: i64 = sql_one(
+        &path,
+        "SELECT count(*) FROM settings WHERE key LIKE 'cursor_%' AND profile_id IS NOT NULL",
+    );
+    assert_eq!(scoped, 0);
+    let rows: i64 = sql_one(&path, "SELECT count(*) FROM settings");
+    assert_eq!(rows, 2);
+}
+
+#[test]
+fn bad_cursor_values_are_refused_and_leave_the_settings_unchanged() {
+    let (_dir, path) = temp_db();
+    let (mut store, _) = open(&path);
+    store.set_cursor_shape("beam").unwrap();
+    store.set_cursor_blink("off").unwrap();
+    for bad in ["bar", "Block", "", "steady"] {
+        let err = store.set_cursor_shape(bad).unwrap_err();
+        assert!(matches!(err, Error::InvalidSetting(_)), "{bad:?}: {err}");
+        assert!(err.to_string().contains("block, beam, underline"), "{err}");
+    }
+    for bad in ["yes", "true", "1", "", "On"] {
+        let err = store.set_cursor_blink(bad).unwrap_err();
+        assert!(matches!(err, Error::InvalidSetting(_)), "{bad:?}: {err}");
+        assert!(err.to_string().contains("on or off"), "{err}");
+    }
+    assert_eq!(store.cursor().unwrap(), CursorStyle::default());
+}
+
+#[test]
+fn a_corrupt_cursor_value_is_reported_not_used() {
+    let (_dir, path) = temp_db();
+    let (store, _) = open(&path);
+    sql(
+        &path,
+        "INSERT INTO settings (profile_id, key, value) VALUES (NULL, 'cursor_shape', 'wedge')",
+    );
+    assert!(matches!(store.cursor(), Err(Error::Corrupt(_))));
 }
 
 #[test]

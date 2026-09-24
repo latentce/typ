@@ -18,19 +18,25 @@ just build
 The steps use `just run`, which runs the debug binary.
 
 1. **Start.** `just run`. The prompt appears in muted gray directly below the
-   command with a reverse-video caret on its first character. There is no
-   countdown, menu, or cleared screen.
+   command with the terminal's cursor, now a steady thin bar, before its
+   first character. There is no countdown, menu, or cleared screen.
 2. **Type.** Type a few words with some mistakes. Correct characters take the
    normal foreground, mistakes are red, extras past the end of a word appear
-   in red after it and push the following text right. Backspace removes
-   characters and extras; backspace at the start of a word only re-enters the
-   previous word if it was left with an error. Only the cells that changed
-   are repainted: no flicker.
-3. **Resize.** Drag the terminal narrower and wider while typing. The prompt
-   re-wraps at word boundaries and repaints in full; the caret stays on the
-   next expected character; nothing is left behind. Shrink the terminal
-   until it is shorter than the prompt: the prompt scrolls to keep the caret
-   visible.
+   in a darker red after it and push the following text right. Press space
+   on a word with a mistake or a missing letter: the whole word is underlined
+   and its missing letters stay gray; the space after it is not underlined.
+   Backspace removes characters and extras; backspace at the start of a word
+   only re-enters the previous word if it was left with an error, and the
+   underline goes away while you are in it. Only the cells that changed are
+   repainted, and the cursor does not flicker or visibly jump.
+3. **Resize.** Drag the terminal narrower and wider while typing, with the
+   cursor on the second line or later. The prompt re-wraps at word
+   boundaries and repaints in full; the cursor stays on the next expected
+   character; nothing is left behind above or below. (The repaint assumes
+   the terminal re-wraps long lines when narrowed, as kitty and most others
+   do; one that clips them instead may repaint too high after a narrowing.)
+   Shrink the terminal until it is shorter than the prompt: the prompt
+   scrolls to keep the cursor visible.
 4. **Paste.** Paste a few words. Nothing is typed and the caret does not
    move.
 5. **Complete.** Type the prompt to the end. On the final character (or a
@@ -50,12 +56,19 @@ The steps use `just run`, which runs the debug binary.
    builds.)
 9. **`NO_COLOR`.** `NO_COLOR=1 just run`. Untyped text is dim, mistakes are
    bold and underlined, nothing is colored.
-10. **Narrow terminal.** Make the terminal narrower than 20 columns and run
+10. **Cursor.** `just run config cursor-shape block` then `just run`: the
+    cursor is a block. `just run config cursor-blink on` then `just run`: it
+    blinks. `just run config cursor-shape underline`: an underline. After
+    each session ends or is interrupted, the shell's cursor is back to what
+    it was before. `just run config cursor-shape beam` and `just run config
+    cursor-blink off` restore the defaults. `just run config cursor-shape
+    bar` refuses on one line.
+11. **Narrow terminal.** Make the terminal narrower than 20 columns and run
     `just run`. It refuses with a one-line message and exits without touching
     the terminal.
-11. **Not a terminal.** `just run < /dev/null` refuses with a one-line
+12. **Not a terminal.** `just run < /dev/null` refuses with a one-line
     message.
-12. **Stats during a session.** `just run` in one terminal and, while it is
+13. **Stats during a session.** `just run` in one terminal and, while it is
     waiting for input, `just run stats` in another (with the same
     `TYP_DATA_DIR`). The listing shows the sessions completed above, most
     recent first, followed by the slowest, most error-prone, and weakest
@@ -63,17 +76,17 @@ The steps use `just run`, which runs the debug binary.
     held some candidates back, `deferred candidates` with the sessions
     remaining, and neither command disturbs the other. Finish or interrupt
     the session: the next `just run` shows a different prompt.
-13. **Replay.** `just run replay N` with an id from the listing. The first
+14. **Replay.** `just run replay N` with an id from the listing. The first
     lines repeat the results the session printed; below them every word
     shows its first attempt, its own raw accuracy, and the errors attributed
     to patterns, and every
     keystroke its interval class. The corrections you typed in step 2 show
     as `excluded: backspace` / `replacement`, the resize as `after_resize`,
     the paste as `in_paste`, and any long pause as a hesitation.
-14. **Rebuild.** `just run stats > /tmp/before`, then `just run rebuild`
+15. **Rebuild.** `just run stats > /tmp/before`, then `just run rebuild`
     (it reports how many sessions it reapplied) and `just run stats` again:
     the output is identical to `/tmp/before`.
-15. **Settings.** `just run --words 12`: the prompt has 12 words; interrupt
+16. **Settings.** `just run --words 12`: the prompt has 12 words; interrupt
     it. `just run config words 15`, then `just run`: the prompt has 15
     words even though one was composed ahead at 50; interrupt it. `just run
     config words 5` refuses on one line and `just run config words` still

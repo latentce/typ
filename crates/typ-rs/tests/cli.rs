@@ -462,6 +462,8 @@ fn config_shows_the_defaults_on_a_fresh_data_directory() {
     assert_eq!(ok(dir.path(), &["config", "words"]), "50\n");
     assert_eq!(ok(dir.path(), &["config", "layout"]), "qwerty\n");
     assert_eq!(ok(dir.path(), &["config", "profile"]), "default\n");
+    assert_eq!(ok(dir.path(), &["config", "cursor-shape"]), "beam\n");
+    assert_eq!(ok(dir.path(), &["config", "cursor-blink"]), "off\n");
 }
 
 #[test]
@@ -473,6 +475,25 @@ fn config_sets_a_value_silently_and_reads_it_back() {
     assert_eq!(ok(dir.path(), &["config", "layout"]), "qwerty\n");
     assert_eq!(ok(dir.path(), &["config", "profile", "alt"]), "");
     assert_eq!(ok(dir.path(), &["config", "profile"]), "alt\n");
+    assert_eq!(ok(dir.path(), &["config", "cursor-shape", "block"]), "");
+    assert_eq!(ok(dir.path(), &["config", "cursor-shape"]), "block\n");
+    assert_eq!(ok(dir.path(), &["config", "cursor-blink", "on"]), "");
+    assert_eq!(ok(dir.path(), &["config", "cursor-blink"]), "on\n");
+}
+
+#[test]
+fn the_cursor_settings_are_shared_by_every_profile() {
+    let dir = tempfile::tempdir().unwrap();
+    ok(dir.path(), &["config", "cursor-shape", "underline"]);
+    assert_eq!(
+        ok(dir.path(), &["config", "cursor-shape", "--profile", "alt"]),
+        "underline\n"
+    );
+    ok(
+        dir.path(),
+        &["config", "cursor-blink", "on", "--profile", "alt"],
+    );
+    assert_eq!(ok(dir.path(), &["config", "cursor-blink"]), "on\n");
 }
 
 #[test]
@@ -490,10 +511,19 @@ fn config_rejects_invalid_values_with_one_line_and_changes_nothing() {
     assert!(line.contains("dvorak") && line.contains("qwerty"), "{line}");
     let line = one_line_error(dir.path(), &["config", "profile", "my profile"]);
     assert!(line.contains("my profile"), "{line}");
+    let line = one_line_error(dir.path(), &["config", "cursor-shape", "bar"]);
+    assert!(
+        line.contains("bar") && line.contains("block, beam, underline"),
+        "{line}"
+    );
+    let line = one_line_error(dir.path(), &["config", "cursor-blink", "yes"]);
+    assert!(line.contains("yes") && line.contains("on or off"), "{line}");
 
     assert_eq!(ok(dir.path(), &["config", "words"]), "30\n");
     assert_eq!(ok(dir.path(), &["config", "layout"]), "qwerty\n");
     assert_eq!(ok(dir.path(), &["config", "profile"]), "default\n");
+    assert_eq!(ok(dir.path(), &["config", "cursor-shape"]), "beam\n");
+    assert_eq!(ok(dir.path(), &["config", "cursor-blink"]), "off\n");
 }
 
 #[test]

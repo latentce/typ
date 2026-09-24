@@ -40,7 +40,7 @@ database, and lets the simulator reuse them without re-implementing anything.
 | `compose` | Word selection, probes, contamination, arrangement. |
 | `metrics` | Session summaries, recent series, probe trends, transfer. |
 | `layout` | Key geometry per layout (finger, hand, row, position). |
-| `display` | Color palette and `NO_COLOR` handling. |
+| `display` | Wraps a session into styled cells and a caret position; the color palette and `NO_COLOR` handling; the cursor shapes. |
 | `random` | A seeded ChaCha PRNG so every draw is reproducible. |
 
 ## A run of `typ`
@@ -98,7 +98,7 @@ Written once, never changed.
 | Table | Holds |
 | --- | --- |
 | `profiles` | Name, layout, when created. |
-| `settings` | Per-profile settings (`words`) and the active profile. |
+| `settings` | Per-profile settings (`words`) and the whole-database ones: the active profile, the cursor shape and blink. |
 | `prompts` | Every prompt shown: when it was composed, under which corpus version, how many words. |
 | `prompt_words` | Each word of each prompt: text, role (targeted or probe), exposed targets, selection score, contamination. |
 | `prompt_targets` | Each pattern selected for a prompt: role (target, deferred, explore), weakness mean and sd, priority, planned dose. |
@@ -152,14 +152,16 @@ interpretable.
 | File | Responsibility |
 | --- | --- |
 | `main.rs` | Argument parsing, the subcommands, the start and end of a session. |
-| `terminal.rs` | Raw mode guard. Restores the terminal on every exit path, panics included. |
+| `terminal.rs` | Raw mode guard. Sets the cursor shape; restores the terminal, cursor included, on every exit path, panics included. |
 | `input.rs` | Decodes terminal events into input events; flags bursts, pastes, resizes. |
-| `render.rs` | Paints the prompt; repaints only changed cells; re-wraps on resize. |
+| `render.rs` | Paints the prompt; repaints only changed cells; re-wraps on resize; rests the hardware cursor on the caret. |
 | `interactive.rs` | The loop that ties input, state machine, and rendering together. |
 | `report.rs` | The text of every report: results, `stats`, `replay`. |
 
-None of this is covered by automated tests. Run through
-[`smoke-test.md`](smoke-test.md) after changing any of it.
+The painter's output is unit tested against the exact escape sequences it
+emits, but raw mode, the real terminal's response to them, and restoration
+on exit are not. Run through [`smoke-test.md`](smoke-test.md) after changing
+any of it.
 
 ## Environment variables
 

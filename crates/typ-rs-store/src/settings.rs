@@ -1,17 +1,20 @@
 //! Settings and profiles: what the user has chosen to keep between runs.
 //!
 //! Two kinds of setting share the `settings` table. A per-profile setting
-//! (`words`, the session length) has the profile's id; the one whole-database
-//! setting (`profile`, which profile a run uses when none is named) has a
-//! null profile id. Each is read with its default when unset. A profile's
-//! layout is a column of `profiles`, not a setting, because a profile is
-//! bound to its layout: it can be chosen while nothing has been typed on the
-//! profile and is fixed from the first typed session on, so the statistics
-//! of one profile never mix two layouts.
+//! (`words`, the session length) has the profile's id; a whole-database
+//! setting (`profile`, which profile a run uses when none is named, and the
+//! cursor's shape and blink, which are how the user likes their terminal
+//! rather than a condition their statistics depend on) has a null profile
+//! id. Each is read with its default when unset. A profile's layout is a
+//! column of `profiles`, not a setting, because a profile is bound to its
+//! layout: it can be chosen while nothing has been typed on the profile and
+//! is fixed from the first typed session on, so the statistics of one
+//! profile never mix two layouts.
 
 use std::ops::RangeInclusive;
 
 use rusqlite::{Connection, OptionalExtension, params};
+use typ_rs_core::display::{CursorShape, CursorStyle};
 use typ_rs_core::layout::Layout;
 
 use crate::{Error, Profile, Result, Store, WORDS_MODE, unix_now};
@@ -24,6 +27,8 @@ pub const WORDS_RANGE: RangeInclusive<usize> = 10..=200;
 
 const WORDS_KEY: &str = "words";
 const PROFILE_KEY: &str = "profile";
+const CURSOR_SHAPE_KEY: &str = "cursor_shape";
+const CURSOR_BLINK_KEY: &str = "cursor_blink";
 
 /// Parses a session length as the user typed it: a whole number within
 /// [`WORDS_RANGE`].
@@ -56,6 +61,53 @@ impl Store {
     pub fn set_active_profile(&mut self, name: &str) -> Result<()> {
         self.profile_or_create(name)?;
         set(&self.conn, None, PROFILE_KEY, name)
+    }
+
+    /// How the cursor is shown during a session.
+    pub fn cursor(&self) -> Result<CursorStyle> {
+        let default = CursorStyle::default();
+        let shape = match get(&self.conn, None, CURSOR_SHAPE_KEY)? {
+            None => default.shape,
+            Some(value) => CursorShape::from_name(&value)
+                .ok_or_else(|| Error::Corrupt(format!("the cursor shape setting is {value:?}")))?,
+        };
+        let blink = match get(&self.conn, None, CURSOR_BLINK_KEY)? {
+            None => default.blink,
+            Some(value) => CursorStyle::blink_from_name(&value)
+                .ok_or_else(|| Error::Corrupt(format!("the cursor blink setting is {value:?}")))?,
+        };
+        Ok(CursorStyle { shape, blink })
+    }
+
+    /// Sets the cursor's shape by name; an unknown name is refused and
+    /// nothing changes.
+    pub fn set_cursor_shape(&mut self, shape: &str) -> Result<()> {
+        let Some(shape) = CursorShape::from_name(shape) else {
+            let known: Vec<&str> = CursorShape::all().iter().map(|s| s.name()).collect();
+            return Err(Error::InvalidSetting(format!(
+                "unknown cursor shape {shape:?}; the shapes are {}",
+                known.join(", ")
+            )));
+        };
+        set(&self.conn, None, CURSOR_SHAPE_KEY, shape.name())
+    }
+
+    /// Sets whether the cursor blinks, from `on` or `off`; anything else is
+    /// refused and nothing changes.
+    pub fn set_cursor_blink(&mut self, blink: &str) -> Result<()> {
+        let Some(blink) = CursorStyle::blink_from_name(blink) else {
+            return Err(Error::InvalidSetting(format!(
+                "cursor blink is {} or {}, not {blink:?}",
+                CursorStyle::blink_name(true),
+                CursorStyle::blink_name(false)
+            )));
+        };
+        set(
+            &self.conn,
+            None,
+            CURSOR_BLINK_KEY,
+            CursorStyle::blink_name(blink),
+        )
     }
 
     /// The profile with the given name, created on first use with the

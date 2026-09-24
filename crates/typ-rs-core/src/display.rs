@@ -18,7 +18,8 @@ pub struct Viewport {
 /// How a cell should look, before colors are chosen.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum CellClass {
-    /// Not yet typed; also the separator space before its word is submitted.
+    /// Not yet typed, including a character never typed in a word that has
+    /// been submitted; also the separator space before its word is submitted.
     Untyped,
     /// Typed correctly; also the separator space of a submitted word.
     Correct,
@@ -26,9 +27,6 @@ pub enum CellClass {
     Incorrect,
     /// An extra character typed past the end of a word; shows what was typed.
     Extra,
-    /// The next expected cell. Only one cell has this class, and none once
-    /// the session is over.
-    Caret,
 }
 
 /// One terminal cell, or two for a double-width character.
@@ -36,6 +34,11 @@ pub enum CellClass {
 pub struct Cell {
     pub ch: char,
     pub class: CellClass,
+    /// The cell is part of a word that was submitted with an uncorrected
+    /// error. Every character of such a word is marked, whether or not it
+    /// was itself typed wrong, so a skipped or misspelled word stands out
+    /// as a whole; its separator space is not.
+    pub uncorrected: bool,
 }
 
 impl Cell {
@@ -43,9 +46,21 @@ impl Cell {
     pub fn width(&self) -> usize {
         self.ch.width().unwrap_or(0).max(1)
     }
+
+    /// The cell's class style, underlined when its word was submitted with
+    /// an uncorrected error.
+    pub fn style(&self, palette: Palette) -> Style {
+        let style = self.class.style(palette);
+        Style {
+            underline: style.underline || self.uncorrected,
+            ..style
+        }
+    }
 }
 
-/// Where the caret is within the visible lines.
+/// Where the caret is within the visible lines: the cell the next keystroke
+/// is expected on. The renderer places the hardware cursor here, so the
+/// cell itself carries no caret styling.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Caret {
     /// Index into [`Display::lines`].
@@ -158,6 +173,7 @@ fn word_cells(state: &SessionState, word: usize) -> (Vec<Cell>, Option<usize>) {
     let position = typed.len();
     let is_current = state.outcome().is_none() && word == state.current_word();
     let submitted = word < state.current_word() || state.outcome() == Some(Outcome::Completed);
+    let uncorrected = submitted && state.has_uncorrected_error(word);
 
     let mut cells = Vec::with_capacity(target.len() + MAX_EXTRAS + 1);
     let mut caret_index = None;
@@ -165,34 +181,35 @@ fn word_cells(state: &SessionState, word: usize) -> (Vec<Cell>, Option<usize>) {
         let class = match typed.get(i) {
             Some(&actual) if actual == expected => CellClass::Correct,
             Some(_) => CellClass::Incorrect,
-            None if is_current && i == position => {
-                caret_index = Some(i);
-                CellClass::Caret
-            }
             None => CellClass::Untyped,
         };
+        if is_current && i == position {
+            caret_index = Some(i);
+        }
         cells.push(Cell {
             ch: expected,
             class,
+            uncorrected,
         });
     }
     for &extra in typed.get(cells.len()..).unwrap_or(&[]) {
         cells.push(Cell {
             ch: displayable(extra),
             class: CellClass::Extra,
+            uncorrected,
         });
     }
-    let space_class = if is_current && caret_index.is_none() {
+    if is_current && caret_index.is_none() {
         caret_index = Some(cells.len());
-        CellClass::Caret
-    } else if submitted {
-        CellClass::Correct
-    } else {
-        CellClass::Untyped
-    };
+    }
     cells.push(Cell {
         ch: ' ',
-        class: space_class,
+        class: if submitted {
+            CellClass::Correct
+        } else {
+            CellClass::Untyped
+        },
+        uncorrected: false,
     });
     (cells, caret_index)
 }
@@ -234,6 +251,9 @@ pub enum Foreground {
     Default,
     BrightBlack,
     Red,
+    /// Extras: wrong like a mistake, but not a character of the prompt, so a
+    /// step darker.
+    DarkRed,
 }
 
 /// Terminal attributes for one cell class under a palette.
@@ -243,7 +263,6 @@ pub struct Style {
     pub dim: bool,
     pub bold: bool,
     pub underline: bool,
-    pub reverse: bool,
 }
 
 impl CellClass {
@@ -251,17 +270,17 @@ impl CellClass {
         let plain = Style::default();
         match (self, palette) {
             (CellClass::Correct, _) => plain,
-            (CellClass::Caret, _) => Style {
-                reverse: true,
-                ..plain
-            },
             (CellClass::Untyped, Palette::Color) => Style {
                 foreground: Foreground::BrightBlack,
                 ..plain
             },
             (CellClass::Untyped, Palette::NoColor) => Style { dim: true, ..plain },
-            (CellClass::Incorrect | CellClass::Extra, Palette::Color) => Style {
+            (CellClass::Incorrect, Palette::Color) => Style {
                 foreground: Foreground::Red,
+                ..plain
+            },
+            (CellClass::Extra, Palette::Color) => Style {
+                foreground: Foreground::DarkRed,
                 ..plain
             },
             (CellClass::Incorrect | CellClass::Extra, Palette::NoColor) => Style {
@@ -270,5 +289,69 @@ impl CellClass {
                 ..plain
             },
         }
+    }
+}
+
+/// The shape of the hardware cursor while a session runs. The names are
+/// kitty's, so a setting reads the same in both places.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum CursorShape {
+    Block,
+    /// A thin vertical bar before the next expected character, as a typing
+    /// site shows it.
+    #[default]
+    Beam,
+    Underline,
+}
+
+impl CursorShape {
+    /// Every shape, in the order they are listed to the user.
+    pub fn all() -> &'static [CursorShape] {
+        &[
+            CursorShape::Block,
+            CursorShape::Beam,
+            CursorShape::Underline,
+        ]
+    }
+
+    /// The name the user sets and sees, and the form a setting stores.
+    pub fn name(self) -> &'static str {
+        match self {
+            CursorShape::Block => "block",
+            CursorShape::Beam => "beam",
+            CursorShape::Underline => "underline",
+        }
+    }
+
+    /// The shape with the given name, if there is one.
+    pub fn from_name(name: &str) -> Option<CursorShape> {
+        CursorShape::all()
+            .iter()
+            .copied()
+            .find(|s| s.name() == name)
+    }
+}
+
+/// How the hardware cursor is shown while a session runs: its shape and
+/// whether it blinks. The terminal is asked for this on entry and given its
+/// own cursor back on exit.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct CursorStyle {
+    pub shape: CursorShape,
+    pub blink: bool,
+}
+
+impl CursorStyle {
+    /// The name the user sets and sees for a blink setting, and the form a
+    /// setting stores: `on` or `off`.
+    pub fn blink_name(blink: bool) -> &'static str {
+        if blink { "on" } else { "off" }
+    }
+
+    /// The blink setting with the given name, if it is one.
+    pub fn blink_from_name(name: &str) -> Option<bool> {
+        [true, false]
+            .into_iter()
+            .find(|&blink| CursorStyle::blink_name(blink) == name)
     }
 }

@@ -4,7 +4,7 @@
 use std::io::{self, Stdout, Write};
 use std::time::Instant;
 
-use typ_rs_core::display::{Palette, Viewport, lay_out};
+use typ_rs_core::display::{CursorStyle, Palette, Viewport, lay_out};
 use typ_rs_core::prompt::Prompt;
 use typ_rs_core::session::{EndCondition, Input, Key, SessionState};
 
@@ -22,8 +22,13 @@ pub struct Run {
     pub render_micros: Vec<u64>,
 }
 
-pub fn run(prompt: Prompt, end: EndCondition, palette: Palette) -> io::Result<Run> {
-    let guard = Guard::enter()?;
+pub fn run(
+    prompt: Prompt,
+    end: EndCondition,
+    palette: Palette,
+    cursor: CursorStyle,
+) -> io::Result<Run> {
+    let guard = Guard::enter(cursor)?;
     let (columns, rows) = crossterm::terminal::size()?;
     let mut viewport = viewport(columns, rows);
     let mut state = SessionState::new(prompt, end);
@@ -57,6 +62,7 @@ pub fn run(prompt: Prompt, end: EndCondition, palette: Palette) -> io::Result<Ru
                 }
                 TerminalEvent::Resize { columns, rows } => {
                     viewport = self::viewport(columns, rows);
+                    screen.painter.terminal_resized_to(usize::from(columns));
                     resized = true;
                     burst |= state.apply_event(stamp(at, Key::Resize, burst)).recorded;
                 }
@@ -79,7 +85,7 @@ pub fn run(prompt: Prompt, end: EndCondition, palette: Palette) -> io::Result<Ru
 }
 
 /// The painter together with where its frames go and the guard that must
-/// know how much has been painted.
+/// know how much is painted below the cursor.
 struct Screen {
     painter: Painter,
     stdout: Stdout,
@@ -91,7 +97,8 @@ impl Screen {
         let frame = self.painter.frame(&lay_out(state, viewport), repaint);
         self.stdout.write_all(frame)?;
         self.stdout.flush()?;
-        self.guard.set_painted_lines(self.painter.painted_lines());
+        self.guard
+            .set_rows_below_cursor(self.painter.rows_below_cursor());
         Ok(())
     }
 }

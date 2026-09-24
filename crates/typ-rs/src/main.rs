@@ -14,7 +14,7 @@ use clap::{Parser, Subcommand, ValueEnum};
 use typ_rs_core::analysis::analyze;
 use typ_rs_core::compose;
 use typ_rs_core::corpus::{CORPUS_VERSION, Corpus};
-use typ_rs_core::display::Palette;
+use typ_rs_core::display::{CursorStyle, Palette};
 use typ_rs_core::metrics::summarize;
 use typ_rs_core::scheduler;
 use typ_rs_core::session::{EndCondition, SEMANTICS_VERSION, SessionState};
@@ -95,6 +95,10 @@ enum SettingKey {
     Layout,
     /// The profile used when --profile is not given; created if new
     Profile,
+    /// The cursor's shape while typing: block, beam, or underline
+    CursorShape,
+    /// Whether the cursor blinks while typing: on or off
+    CursorBlink,
 }
 
 fn main() -> ExitCode {
@@ -162,8 +166,9 @@ fn session(words: Option<&str>, profile: Option<&str>) -> Result<(), Box<dyn Err
     })?;
     let end = EndCondition::AfterWords(started.prompt.word_count());
     let palette = Palette::from_no_color(std::env::var("NO_COLOR").ok().as_deref());
+    let cursor = store.cursor()?;
 
-    let run = interactive::run(started.prompt.clone(), end, palette)?;
+    let run = interactive::run(started.prompt.clone(), end, palette, cursor)?;
 
     let ended = end_session(
         &mut store,
@@ -314,7 +319,8 @@ fn stats(profile: Option<&str>) -> Result<(), Box<dyn Error>> {
 
 /// Shows a setting's current value, or sets it. `words` and `layout` are
 /// the profile's (the active one, or `--profile`); `profile` is the active
-/// profile itself, which `--profile` does not touch.
+/// profile itself and the cursor settings are the user's, and `--profile`
+/// touches neither.
 fn config(
     profile: Option<&str>,
     key: SettingKey,
@@ -329,6 +335,12 @@ fn config(
         (SettingKey::Layout, Some(value)) => store.set_layout(&profile, &value)?,
         (SettingKey::Profile, None) => println!("{}", store.active_profile()?),
         (SettingKey::Profile, Some(value)) => store.set_active_profile(&value)?,
+        (SettingKey::CursorShape, None) => println!("{}", store.cursor()?.shape.name()),
+        (SettingKey::CursorShape, Some(value)) => store.set_cursor_shape(&value)?,
+        (SettingKey::CursorBlink, None) => {
+            println!("{}", CursorStyle::blink_name(store.cursor()?.blink))
+        }
+        (SettingKey::CursorBlink, Some(value)) => store.set_cursor_blink(&value)?,
     }
     Ok(())
 }

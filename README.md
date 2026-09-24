@@ -42,8 +42,13 @@ This puts a `typ` binary in `~/.cargo/bin`.
 
 ### A session
 
-Run `typ`. The prompt appears below your shell prompt; start typing. Mistakes
-show in red, backspace fixes them. `Ctrl-C` or `Esc` ends early.
+Run `typ`. The prompt appears below your shell prompt in gray; start typing.
+Correct letters take your normal text color, mistakes show the expected
+letter in red, and anything typed past the end of a word is added in a
+darker red. Space moves to the next word whether or not the word is right;
+a word left wrong is underlined. Backspace fixes mistakes, and steps back
+into the previous word only if that word was left wrong. `Ctrl-C` or `Esc`
+ends early.
 
 When you finish, three lines print:
 
@@ -70,10 +75,17 @@ typ config words             # show the current setting
 typ --profile laptop         # use a profile for this run (created if new)
 typ config profile laptop    # switch to it permanently
 typ config layout            # show this profile's layout (only qwerty exists)
+
+typ config cursor-shape block    # block, beam (the default), or underline
+typ config cursor-blink on       # on or off (the default)
 ```
 
 A profile is an isolated history. Use one per physically different setup: a
 different keyboard, a different layout. Stats never mix across profiles.
+
+The cursor settings are yours, not a profile's: they apply to every profile.
+While a session runs, `typ` gives the terminal's cursor the shape and blink
+you chose, and hands the terminal its own cursor back when the session ends.
 
 ### Looking at your history
 
