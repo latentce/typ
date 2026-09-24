@@ -18,7 +18,7 @@ use typ_rs_core::metrics::{
 use typ_rs_core::model::{ModelState, PatternEstimate, ROOT, SchedulerConfig, Weakness};
 use typ_rs_core::scheduler::{TargetRole, TrainingHistory, eligible_patterns};
 use typ_rs_core::session::{EventKind, Outcome, SessionState};
-use typ_rs_store::StoredSession;
+use typ_rs_store::{SessionId, StoredSession};
 
 /// How many patterns each list of the pattern summary shows.
 const LISTED_PATTERNS: usize = 10;
@@ -108,8 +108,25 @@ fn or_dashes(value: Option<f64>, format: impl Fn(f64) -> String) -> String {
     value.map_or_else(|| "--".to_string(), format)
 }
 
+/// As [`or_dashes`], right-aligned in a column `width` wide, so that a
+/// missing figure takes the room of a present one.
+fn or_dashes_in_column<T>(value: Option<T>, width: usize, format: impl Fn(T) -> String) -> String {
+    let figure = value.map_or_else(|| "--".to_string(), format);
+    format!("{figure:>width$}")
+}
+
 fn percent_or_dashes(value: Option<f64>) -> String {
     or_dashes(value, |v| format!("{:.0}%", 100.0 * v))
+}
+
+/// A share as a percentage with one decimal, six columns wide.
+fn percent_in_column(value: Option<f64>) -> String {
+    or_dashes_in_column(value, 6, |v| format!("{:.1}%", 100.0 * v))
+}
+
+/// A speed as whole WPM, three columns wide.
+fn wpm_in_column(value: Option<f64>) -> String {
+    or_dashes_in_column(value, 3, |v| format!("{v:.0}"))
 }
 
 /// `next:` followed by the next prompt's targets in rank order and its
@@ -134,36 +151,80 @@ fn next_line(next: &ComposedPrompt) -> String {
     }
 }
 
-/// One line per completed session, most recent first: gross WPM, the speed
-/// on standard text, raw accuracy, and consistency, from the session's
-/// cached summary. A session without one (not yet applied) is analyzed on
-/// the spot and shows no speed on standard text.
+/// The completed sessions most recent first under a header naming the
+/// columns, one line per session: gross WPM, the speed on standard text,
+/// raw accuracy, and consistency, from the session's cached summary. A
+/// session without one (not yet applied) is analyzed on the spot and shows
+/// no speed on standard text.
 pub fn session_listing(sessions: &[StoredSession]) -> String {
     if sessions.is_empty() {
         return "no completed sessions yet\n".to_string();
     }
-    sessions
-        .iter()
-        .map(|session| {
-            let (wpm, reference, raw, consistency) = match &session.summary {
-                Some(s) => (s.gross_wpm, s.reference_wpm, s.raw_accuracy, s.consistency),
-                None => {
-                    let m = analyze(&session.replay()).metrics;
-                    (m.gross_wpm, None, m.raw_accuracy, m.consistency)
+    let mut out = listing_header();
+    for session in sessions {
+        let id = session.id;
+        let when = &session.started_at_local;
+        let words = session.prompt.word_count();
+        let listed = match &session.summary {
+            Some(s) => ListedSession {
+                id,
+                when,
+                words,
+                wpm: s.gross_wpm,
+                reference: s.reference_wpm,
+                raw_accuracy: s.raw_accuracy,
+                consistency: s.consistency,
+            },
+            None => {
+                let m = analyze(&session.replay()).metrics;
+                ListedSession {
+                    id,
+                    when,
+                    words,
+                    wpm: m.gross_wpm,
+                    reference: None,
+                    raw_accuracy: m.raw_accuracy,
+                    consistency: m.consistency,
                 }
-            };
-            format!(
-                "{:>4}  {}  {:>3} words  {:>3.0} wpm  {:>3} on standard text  {:>5.1}% raw  {:>4} consistency\n",
-                session.id,
-                session.started_at_local,
-                session.prompt.word_count(),
-                wpm.unwrap_or(0.0),
-                or_dashes(reference, |r| format!("{r:.0}")),
-                100.0 * raw,
-                percent_or_dashes(consistency),
-            )
-        })
-        .collect()
+            }
+        };
+        out.push_str(&listing_row(&listed));
+    }
+    out
+}
+
+/// One session's figures as the listing shows them.
+struct ListedSession<'a> {
+    id: SessionId,
+    /// The local start time, `YYYY-MM-DD HH:MM`.
+    when: &'a str,
+    words: usize,
+    wpm: Option<f64>,
+    reference: Option<f64>,
+    raw_accuracy: f64,
+    consistency: Option<f64>,
+}
+
+/// The listing's column labels, each right-aligned over the word that
+/// names the same figure in the rows beneath.
+fn listing_header() -> String {
+    format!(
+        "{:>4}  {:<16}  {:>9}  {:>7}  {:>20}  {:>10}  {:>16}\n",
+        "id", "when", "words", "wpm", "on standard text", "raw", "consistency"
+    )
+}
+
+fn listing_row(session: &ListedSession) -> String {
+    format!(
+        "{:>4}  {}  {:>3} words  {:>3.0} wpm  {} on standard text  {:>5.1}% raw  {:>4} consistency\n",
+        session.id,
+        session.when,
+        session.words,
+        session.wpm.unwrap_or(0.0),
+        wpm_in_column(session.reference),
+        100.0 * session.raw_accuracy,
+        percent_or_dashes(session.consistency),
+    )
 }
 
 /// Each session replayed and analyzed, in the order given.
@@ -229,8 +290,8 @@ pub fn probe_section(performances: &[Vec<WordPerformance>]) -> String {
 fn probe_figures(metrics: &ProbeMetrics) -> String {
     format!(
         "{} wpm  {} raw",
-        or_dashes(metrics.wpm, |w| format!("{w:>3.0}")),
-        or_dashes(metrics.raw_accuracy, |a| format!("{:.1}%", 100.0 * a))
+        wpm_in_column(metrics.wpm),
+        percent_in_column(metrics.raw_accuracy)
     )
 }
 
@@ -293,13 +354,9 @@ pub fn transfer_section(
 
 fn slot_figures(slots: &SlotAggregate) -> String {
     format!(
-        "{} {} raw  n {:>3}",
-        slots
-            .median_latency_micros()
-            .map_or("  -- ms".to_string(), |l| format!("{:>4} ms", l / 1000)),
-        slots
-            .raw_accuracy()
-            .map_or("   --".to_string(), |a| format!("{:>5.1}%", 100.0 * a)),
+        "{} ms {} raw  n {:>3}",
+        or_dashes_in_column(slots.median_latency_micros(), 4, |l| (l / 1000).to_string()),
+        percent_in_column(slots.raw_accuracy()),
         slots.slots
     )
 }
@@ -863,6 +920,77 @@ mod tests {
             word_initiation_line(&sessions),
             "\nword initiation (median ms, oldest first)\n  800  400\n"
         );
+    }
+
+    #[test]
+    fn a_missing_probe_figure_takes_the_room_of_a_present_one() {
+        let full = ProbeMetrics {
+            words: 4,
+            wpm: Some(150.0),
+            raw_accuracy: Some(0.9167),
+        };
+        let empty = ProbeMetrics::default();
+        assert_eq!(probe_figures(&full), "150 wpm   91.7% raw");
+        assert_eq!(probe_figures(&empty), " -- wpm      -- raw");
+        assert_eq!(probe_figures(&full).len(), probe_figures(&empty).len());
+    }
+
+    #[test]
+    fn a_missing_slot_figure_takes_the_room_of_a_present_one() {
+        let full = SlotAggregate {
+            slots: 2,
+            errors: 0.0,
+            clean_latencies_micros: vec![100_000, 100_000],
+        };
+        let empty = SlotAggregate::default();
+        assert_eq!(slot_figures(&full), " 100 ms 100.0% raw  n   2");
+        assert_eq!(slot_figures(&empty), "  -- ms     -- raw  n   0");
+        assert_eq!(slot_figures(&full).len(), slot_figures(&empty).len());
+    }
+
+    fn listed(reference: Option<f64>, consistency: Option<f64>) -> ListedSession<'static> {
+        ListedSession {
+            id: "2".parse().unwrap(),
+            when: "2024-01-16 08:00",
+            words: 2,
+            wpm: Some(140.0),
+            reference,
+            raw_accuracy: 1.0,
+            consistency,
+        }
+    }
+
+    #[test]
+    fn the_listing_header_sits_over_the_columns_of_a_row() {
+        let header = listing_header();
+        let row = listing_row(&listed(Some(120.0), Some(1.0)));
+        assert_eq!(
+            row,
+            "   2  2024-01-16 08:00    2 words  140 wpm  120 on standard text  100.0% raw  100% consistency\n"
+        );
+        assert_eq!(header.len(), row.len());
+        // `id` ends where the id does; `when` starts where the date does;
+        // every other label stands over the same word in the row.
+        assert_eq!(header.find("id").unwrap() + 2, row.find('2').unwrap() + 1);
+        assert_eq!(header.find("when"), row.find("2024"));
+        for label in ["words", "wpm", "on standard text", "raw", "consistency"] {
+            assert_eq!(
+                header.find(label),
+                row.find(label),
+                "{label}\n{header}{row}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_listing_row_with_missing_figures_is_as_wide_as_one_without() {
+        let full = listing_row(&listed(Some(120.0), Some(1.0)));
+        let sparse = listing_row(&listed(None, None));
+        assert_eq!(
+            sparse,
+            "   2  2024-01-16 08:00    2 words  140 wpm   -- on standard text  100.0% raw    -- consistency\n"
+        );
+        assert_eq!(full.len(), sparse.len());
     }
 
     #[test]

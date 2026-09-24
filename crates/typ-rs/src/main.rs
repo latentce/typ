@@ -26,11 +26,11 @@ use typ_rs_store::{
 /// Narrower than this and no useful prompt can be shown.
 const MIN_COLUMNS: u16 = 20;
 
-/// How many completed sessions `typ stats` lists.
+/// How many completed sessions `typ inspect` lists.
 const LISTED_SESSIONS: usize = 10;
 
-/// How many completed sessions `typ stats` reads probe words from: enough
-/// for two full probe windows once prompts are mostly targeted.
+/// How many completed sessions `typ inspect` reads probe words from:
+/// enough for two full probe windows once prompts are mostly targeted.
 const PROBE_SESSIONS: usize = 50;
 
 const DATABASE_FILE: &str = "typ.db";
@@ -63,10 +63,14 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
-    /// Show recent sessions, probe and word-initiation trends, transfer to
-    /// untargeted words, the patterns you are weakest on, and the
-    /// candidates being held back
+    /// Show your progress: recent sessions, probe and word-initiation
+    /// trends, transfer to untargeted words, the patterns you are weakest
+    /// on, and the candidates being held back
     Stats,
+    /// Show the model's view: what the trainer believes about your
+    /// patterns, with the evidence behind each estimate, and the
+    /// candidates being held back
+    Inspect,
     /// Show a setting, or set it for every run to come
     Config {
         key: SettingKey,
@@ -78,7 +82,7 @@ enum Command {
     /// Show how a stored session was interpreted: every word's first
     /// attempt and attributed errors, and every interval's classification
     Replay {
-        /// The session id, as listed by `typ stats`
+        /// The session id, as listed by `typ inspect`
         session_id: SessionId,
         /// Instead, show where the current pipeline's figures for the
         /// session differ from the ones stored for it
@@ -108,10 +112,10 @@ fn main() -> ExitCode {
     let outcome = match cli.command {
         None => session(cli.words.as_deref(), profile),
         Some(_) if cli.words.is_some() => Err("--words applies only to a session".into()),
-        Some(Command::Stats) => stats(profile),
+        Some(Command::Stats | Command::Inspect) => inspect(profile),
         Some(Command::Config { key, value }) => config(profile, key, value),
         Some(Command::Rebuild | Command::Replay { .. }) if profile.is_some() => {
-            Err("--profile applies only to a session, stats, or config".into())
+            Err("--profile applies only to a session, stats, inspect, or config".into())
         }
         Some(Command::Rebuild) => rebuild(),
         Some(Command::Replay { session_id, diff }) => replay(session_id, diff),
@@ -321,7 +325,10 @@ fn end_session(store: &mut Store, profile: &Profile, run: &FinishedRun) -> Ended
     }
 }
 
-fn stats(profile: Option<&str>) -> Result<(), Box<dyn Error>> {
+/// Prints the model's view of a profile: the recent sessions, the probe and
+/// word-initiation trends, transfer to untargeted words, and what the model
+/// believes about the user's patterns. `typ stats` prints the same report.
+fn inspect(profile: Option<&str>) -> Result<(), Box<dyn Error>> {
     let mut store = open_store()?;
     let profile = open_profile(&mut store, profile)?;
     let sessions = store.completed_sessions(&profile, PROBE_SESSIONS)?;

@@ -174,7 +174,7 @@ The weakness is a **distribution**, not a number. Each component's
 uncertainty comes from how much evidence backs it, and they are combined into
 a mean and a standard deviation. A pattern seen three times can have a high
 mean weakness with a wide spread; one seen three hundred times has a narrow
-one. `typ stats` shows both (`+0.42 ± 0.18`).
+one. `typ inspect` shows both (`+0.42 ± 0.18`).
 
 ## 5. Picking targets
 
@@ -211,7 +211,7 @@ sessions. They still appear in prompts at their natural rate; what they do
 not get is targeted practice. Comparing how deferred and targeted patterns
 move over time is the only way to tell practice from regression to the mean
 (a pattern that looked weak because of a bad day would have improved anyway).
-`typ stats` lists them under `deferred candidates`.
+`typ inspect` lists them under `deferred candidates`.
 
 **Exploration.** One extra pattern per session is drawn in proportion to
 importance × uncertainty, ignoring rank. It gets the same dose as a target.
@@ -309,7 +309,7 @@ It is reported against a recency-weighted average of your recent sessions
 
 ### Probes
 
-`typ stats` reports speed and raw accuracy over your last hundred
+`typ inspect` reports speed and raw accuracy over your last hundred
 uncontaminated probe words and compares with the hundred before. The
 `sustained improvement` / `sustained decline` marker appears only when the
 previous hundred's level falls outside the 95% confidence interval of the
@@ -319,7 +319,7 @@ anything you have recently drilled.
 
 ### Transfer
 
-For each recently practiced pattern, `typ stats` shows how you type it in
+For each recently practiced pattern, `typ inspect` shows how you type it in
 words that were used to drill it versus words that were not. If the drilled
 words got fast and the others did not, you learned the words. If both did,
 you learned the pattern.

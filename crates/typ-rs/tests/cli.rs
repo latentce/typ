@@ -169,18 +169,20 @@ fn a_session_refuses_to_start_without_an_interactive_terminal() {
 }
 
 #[test]
-fn stats_on_a_fresh_data_directory_creates_the_database_and_lists_nothing() {
-    let dir = tempfile::tempdir().unwrap();
-    let run = typ_in(dir.path(), &["stats"]);
+fn inspect_and_stats_on_a_fresh_data_directory_create_the_database_and_list_nothing() {
+    for command in ["inspect", "stats"] {
+        let dir = tempfile::tempdir().unwrap();
+        let run = typ_in(dir.path(), &[command]);
 
-    assert!(run.ok, "{}", run.stderr);
-    assert_eq!(run.stdout, "no completed sessions yet\n");
-    assert_eq!(run.stderr, "");
-    assert!(dir.path().join("typ.db").is_file());
+        assert!(run.ok, "{command}: {}", run.stderr);
+        assert_eq!(run.stdout, "no completed sessions yet\n", "{command}");
+        assert_eq!(run.stderr, "", "{command}");
+        assert!(dir.path().join("typ.db").is_file());
+    }
 }
 
 #[test]
-fn stats_lists_completed_sessions_most_recent_first_and_skips_interrupted_ones() {
+fn inspect_and_stats_list_completed_sessions_most_recent_first_and_skip_interrupted_ones() {
     let dir = tempfile::tempdir().unwrap();
     {
         let mut store = Store::open(&dir.path().join("typ.db")).unwrap();
@@ -191,16 +193,21 @@ fn stats_lists_completed_sessions_most_recent_first_and_skips_interrupted_ones()
         store_session(&mut store, 1_705_400_000, "cat dog", "ca⎋");
     }
 
-    let run = typ_in(dir.path(), &["stats"]);
-    assert!(run.ok, "{}", run.stderr);
-    let mut sections = run.stdout.split("\n\n");
+    let inspect = typ_in(dir.path(), &["inspect"]);
+    assert!(inspect.ok, "{}", inspect.stderr);
+    let stats = typ_in(dir.path(), &["stats"]);
+    assert!(stats.ok, "{}", stats.stderr);
+    assert_eq!(stats.stdout, inspect.stdout);
+
+    let mut sections = inspect.stdout.split("\n\n");
     // Every keystroke took 100 ms, so each session's speed on standard
     // text is 120 wpm: the pace of its clean intervals, whatever the
     // prompt. Gross WPM counts one character more than there are
     // intervals, which shows on a two-word prompt.
     assert_eq!(
         sections.next().unwrap(),
-        "   2  2024-01-16 08:00    2 words  140 wpm  120 on standard text  100.0% raw  100% consistency\n\
+        "  id  when                  words      wpm      on standard text         raw       consistency\n\
+         \x20  2  2024-01-16 08:00    2 words  140 wpm  120 on standard text  100.0% raw  100% consistency\n\
          \x20  1  2024-01-15 10:30    2 words  120 wpm  120 on standard text   83.3% raw  100% consistency"
     );
     // Four probe words: 15 characters (the last word of the second session
@@ -208,7 +215,7 @@ fn stats_lists_completed_sessions_most_recent_first_and_skips_interrupted_ones()
     // right the first time. Too few for a previous window, so no marker.
     assert_eq!(
         sections.next().unwrap(),
-        "probes\n  last   4 uncontaminated  150 wpm  91.7% raw"
+        "probes\n  last   4 uncontaminated  150 wpm   91.7% raw"
     );
     assert_eq!(
         sections.next().unwrap(),
@@ -249,7 +256,7 @@ fn stats_lists_completed_sessions_most_recent_first_and_skips_interrupted_ones()
 }
 
 #[test]
-fn stats_shows_transfer_of_recently_practiced_patterns_to_untargeted_words() {
+fn inspect_and_stats_show_transfer_of_recently_practiced_patterns_to_untargeted_words() {
     let dir = tempfile::tempdir().unwrap();
     {
         let mut store = Store::open(&dir.path().join("typ.db")).unwrap();
@@ -266,24 +273,66 @@ fn stats_shows_transfer_of_recently_practiced_patterns_to_untargeted_words() {
         store_session(&mut store, 1_705_392_000, "cat hat", "cat hat");
     }
 
-    let run = typ_in(dir.path(), &["stats"]);
+    for command in ["inspect", "stats"] {
+        let run = typ_in(dir.path(), &[command]);
+        assert!(run.ok, "{command}: {}", run.stderr);
+        let transfer = run
+            .stdout
+            .split("\n\n")
+            .find(|s| s.starts_with("transfer to untargeted words"))
+            .unwrap_or_else(|| panic!("{command}: {}", run.stdout));
+        // "cat" was targeted in the last ten sessions, so both its `t` slots
+        // are on the targeted side; both of "hat" are on the other.
+        assert_eq!(
+            transfer,
+            "transfer to untargeted words\n\
+             \x20 at   targeted  100 ms 100.0% raw  n   2  untargeted  100 ms 100.0% raw  n   2",
+            "{command}"
+        );
+    }
+}
+
+#[test]
+fn inspect_lines_up_a_transfer_row_without_targeted_slots_with_one_that_has_them() {
+    let dir = tempfile::tempdir().unwrap();
+    {
+        let mut store = Store::open(&dir.path().join("typ.db")).unwrap();
+        // The second prompt targets `at` and `og` but only "cat" is shown
+        // as targeted, so `og` is met in "dog" on the untargeted side alone.
+        store_session_with(
+            &mut store,
+            1_705_314_600,
+            "cat hat dog",
+            "cat hat dog",
+            vec![
+                target("at", TargetRole::Target),
+                target("og", TargetRole::Target),
+            ],
+            vec!["cat"],
+        );
+        store_session(&mut store, 1_705_392_000, "cat hat dog", "cat hat dog");
+    }
+
+    let run = typ_in(dir.path(), &["inspect"]);
     assert!(run.ok, "{}", run.stderr);
     let transfer = run
         .stdout
         .split("\n\n")
         .find(|s| s.starts_with("transfer to untargeted words"))
         .unwrap_or_else(|| panic!("{}", run.stdout));
-    // "cat" was targeted in the last ten sessions, so both its `t` slots
-    // are on the targeted side; both of "hat" are on the other.
+    let rows: Vec<&str> = transfer.lines().skip(1).collect();
     assert_eq!(
-        transfer,
-        "transfer to untargeted words\n\
-         \x20 at   targeted  100 ms 100.0% raw  n   2  untargeted  100 ms 100.0% raw  n   2"
+        rows,
+        [
+            "  at   targeted  100 ms 100.0% raw  n   2  untargeted  100 ms 100.0% raw  n   2",
+            "  og   targeted   -- ms     -- raw  n   0  untargeted  100 ms 100.0% raw  n   2",
+        ]
     );
+    assert_eq!(rows[0].len(), rows[1].len());
 }
 
 #[test]
-fn stats_shows_the_deferred_candidates_with_their_windows() {
+fn inspect_and_stats_show_the_deferred_candidates_with_their_windows() {
     let dir = tempfile::tempdir().unwrap();
     {
         let mut store = Store::open(&dir.path().join("typ.db")).unwrap();
@@ -302,13 +351,52 @@ fn stats_shows_the_deferred_candidates_with_their_windows() {
         );
     }
 
-    let run = typ_in(dir.path(), &["stats"]);
+    for command in ["inspect", "stats"] {
+        let run = typ_in(dir.path(), &[command]);
+        assert!(run.ok, "{command}: {}", run.stderr);
+        let deferred = run.stdout.split("\n\n").last().unwrap();
+        assert_eq!(
+            deferred, "deferred candidates\n  og   2 sessions remaining\n",
+            "{command}"
+        );
+    }
+}
+
+#[test]
+fn the_inspect_listing_header_lines_up_with_its_rows_whether_or_not_a_figure_is_missing() {
+    let dir = tempfile::tempdir().unwrap();
+    {
+        let mut store = Store::open(&dir.path().join("typ.db")).unwrap();
+        store_session(&mut store, 1_705_314_600, "cat dog", "cat dog");
+        store_session(&mut store, 1_705_392_000, "cat dog", "cat dog");
+    }
+    // A session applied to the model but not yet summarized has no speed
+    // on standard text to show.
+    rusqlite::Connection::open(dir.path().join("typ.db"))
+        .unwrap()
+        .execute_batch("DELETE FROM session_metrics WHERE session_id = 1")
+        .unwrap();
+
+    let run = typ_in(dir.path(), &["inspect"]);
     assert!(run.ok, "{}", run.stderr);
-    let deferred = run.stdout.split("\n\n").last().unwrap();
+    let listing: Vec<&str> = run.stdout.split("\n\n").next().unwrap().lines().collect();
+    let [header, full, sparse] = listing[..] else {
+        panic!("{}", run.stdout);
+    };
     assert_eq!(
-        deferred,
-        "deferred candidates\n  og   2 sessions remaining\n"
+        header,
+        "  id  when                  words      wpm      on standard text         raw       consistency"
     );
+    assert_eq!(
+        full,
+        "   2  2024-01-16 08:00    2 words  140 wpm  120 on standard text  100.0% raw  100% consistency"
+    );
+    assert_eq!(
+        sparse,
+        "   1  2024-01-15 10:30    2 words  140 wpm   -- on standard text  100.0% raw  100% consistency"
+    );
+    assert_eq!(header.len(), full.len());
+    assert_eq!(full.len(), sparse.len());
 }
 
 #[test]
@@ -320,15 +408,16 @@ fn rebuild_reports_how_many_sessions_it_reapplied_and_changes_nothing_visible() 
         store_session(&mut store, 1_705_392_000, "cat dog", "cat dog");
         store_session(&mut store, 1_705_400_000, "cat dog", "ca⎋");
     }
-    let before = typ_in(dir.path(), &["stats"]);
+    let before = typ_in(dir.path(), &["inspect"]);
 
     let run = typ_in(dir.path(), &["rebuild"]);
     assert!(run.ok, "{}", run.stderr);
     assert_eq!(run.stdout, "rebuilt the statistics from 3 sessions\n");
     assert_eq!(run.stderr, "");
 
-    let after = typ_in(dir.path(), &["stats"]);
+    let after = typ_in(dir.path(), &["inspect"]);
     assert_eq!(after.stdout, before.stdout);
+    assert_eq!(typ_in(dir.path(), &["stats"]).stdout, before.stdout);
 
     let run = typ(&["rebuild"]);
     assert!(run.ok, "{}", run.stderr);
@@ -533,6 +622,16 @@ fn an_unknown_setting_fails() {
     assert!(run.stderr.contains("color"), "{}", run.stderr);
 }
 
+/// The first listed session of `command`'s output, under the header.
+fn first_listed(data_dir: &Path, command: &str) -> String {
+    let stdout = ok(data_dir, &[command]);
+    stdout
+        .lines()
+        .nth(1)
+        .unwrap_or_else(|| panic!("{command}: {stdout}"))
+        .to_string()
+}
+
 #[test]
 fn switching_profile_switches_whose_settings_and_sessions_are_shown() {
     let dir = tempfile::tempdir().unwrap();
@@ -541,15 +640,21 @@ fn switching_profile_switches_whose_settings_and_sessions_are_shown() {
         store_session(&mut store, 1_705_392_000, "cat dog", "cat dog");
     }
     ok(dir.path(), &["config", "words", "30"]);
-    assert!(ok(dir.path(), &["stats"]).starts_with("   1  2024-01-16"));
+    for command in ["inspect", "stats"] {
+        assert!(first_listed(dir.path(), command).starts_with("   1  2024-01-16"));
+    }
 
     ok(dir.path(), &["config", "profile", "alt"]);
     assert_eq!(ok(dir.path(), &["config", "words"]), "50\n");
-    assert_eq!(ok(dir.path(), &["stats"]), "no completed sessions yet\n");
+    for command in ["inspect", "stats"] {
+        assert_eq!(ok(dir.path(), &[command]), "no completed sessions yet\n");
+    }
 
     ok(dir.path(), &["config", "profile", "default"]);
     assert_eq!(ok(dir.path(), &["config", "words"]), "30\n");
-    assert!(ok(dir.path(), &["stats"]).starts_with("   1  2024-01-16"));
+    for command in ["inspect", "stats"] {
+        assert!(first_listed(dir.path(), command).starts_with("   1  2024-01-16"));
+    }
 }
 
 #[test]
@@ -566,11 +671,13 @@ fn the_profile_flag_applies_to_one_run_and_does_not_change_the_active_profile() 
         ok(dir.path(), &["config", "words", "--profile", "alt"]),
         "30\n"
     );
-    assert_eq!(
-        ok(dir.path(), &["stats", "--profile", "alt"]),
-        "no completed sessions yet\n"
-    );
-    assert!(ok(dir.path(), &["stats"]).starts_with("   1  2024-01-16"));
+    for command in ["inspect", "stats"] {
+        assert_eq!(
+            ok(dir.path(), &[command, "--profile", "alt"]),
+            "no completed sessions yet\n"
+        );
+        assert!(first_listed(dir.path(), command).starts_with("   1  2024-01-16"));
+    }
 }
 
 #[test]
@@ -581,8 +688,10 @@ fn the_words_flag_is_validated_and_only_applies_to_a_session() {
         assert!(line.contains("10") && line.contains("200"), "{line}");
         assert!(line.contains(bad), "{line}");
     }
-    let line = one_line_error(dir.path(), &["--words", "20", "stats"]);
-    assert!(line.contains("--words"), "{line}");
+    for command in ["inspect", "stats"] {
+        let line = one_line_error(dir.path(), &["--words", "20", command]);
+        assert!(line.contains("--words"), "{command}: {line}");
+    }
     assert!(!dir.path().join("typ.db").exists());
 }
 
@@ -595,6 +704,10 @@ fn the_profile_flag_is_rejected_where_it_would_have_no_effect() {
     ] {
         let line = one_line_error(dir.path(), args);
         assert!(line.contains("--profile"), "{args:?}: {line}");
+        assert!(
+            line.contains("stats") && line.contains("inspect"),
+            "{args:?}: {line}"
+        );
     }
     assert!(!dir.path().join("typ.db").exists());
 }
@@ -605,8 +718,9 @@ fn a_profile_is_created_the_first_time_it_is_named_whatever_the_command() {
     ok(dir.path(), &["--profile", "a", "config", "profile"]);
     ok(dir.path(), &["--profile", "b", "stats"]);
     ok(dir.path(), &["--profile", "c", "config", "layout"]);
+    ok(dir.path(), &["--profile", "d", "inspect"]);
     let db = Store::open(&dir.path().join("typ.db")).unwrap();
-    for name in ["a", "b", "c"] {
+    for name in ["a", "b", "c", "d"] {
         assert_eq!(db.profile(name).unwrap().layout, "qwerty", "{name}");
     }
 }

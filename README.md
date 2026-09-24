@@ -110,6 +110,7 @@ Shows your last ten sessions, then:
 - **deferred candidates**: patterns being held back as controls.
 
 ```
+typ inspect            # the model's view: what it believes about your patterns, with the evidence
 typ replay 12          # how session 12 was interpreted, word by word
 typ replay 12 --diff   # what the current algorithm would say differently
 typ rebuild            # recompute every statistic from stored sessions

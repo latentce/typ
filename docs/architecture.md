@@ -179,7 +179,7 @@ interpretable.
 | `input.rs` | Decodes terminal events into input events; flags bursts, pastes, resizes. |
 | `render.rs` | Paints the prompt; repaints only changed cells; re-wraps on resize; rests the hardware cursor on the caret. |
 | `interactive.rs` | The loop that ties input, state machine, and rendering together. |
-| `report.rs` | The text of every report: results, `stats`, `replay`. |
+| `report.rs` | The text of every report: results, `stats`, `inspect`, `replay`. |
 
 The painter's output is unit tested against the exact escape sequences it
 emits, but raw mode, the real terminal's response to them, and restoration
