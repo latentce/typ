@@ -7,7 +7,17 @@ use typ_rs_core::model::MODEL_VERSION;
 use typ_rs_core::prompt::Prompt;
 use typ_rs_core::scheduler::{SelectedTarget, TargetRole};
 
-use crate::{Error, Result, json};
+use crate::{Error, Profile, Result, Store, json};
+
+impl Store {
+    /// The prompt composed ahead for the profile's next session, as it
+    /// was composed; `None` when none is waiting. The prompt stays
+    /// waiting. For showing the user what comes next, not for composing:
+    /// a waiting prompt may yet be discarded.
+    pub fn waiting_prompt(&self, profile: &Profile) -> Result<Option<ComposedPrompt>> {
+        Ok(next_waiting(&self.conn, profile.id)?.map(LoadedPrompt::into_composed))
+    }
+}
 
 /// What a prompt was composed for. A prompt composed ahead is shown only to
 /// a session with the same context; a changed setting, a new corpus, a new
@@ -276,6 +286,15 @@ impl LoadedPrompt {
             .filter(|(_, meta)| meta.role == WordRole::Targeted)
             .map(|(word, _)| word.clone())
             .collect()
+    }
+
+    /// The prompt as it was composed, without its row id.
+    pub(crate) fn into_composed(self) -> ComposedPrompt {
+        ComposedPrompt {
+            prompt: self.prompt,
+            words: self.words,
+            targets: self.targets,
+        }
     }
 }
 

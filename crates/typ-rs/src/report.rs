@@ -1,21 +1,26 @@
-//! The plain-text output of `typ`: the results block, the session listing,
-//! the probe, word-initiation, and transfer views, the pattern summary,
-//! and the replay report.
+//! The plain-text output of `typ`: the results block, the progress view,
+//! the session listing, the probe, word-initiation, and transfer views,
+//! the pattern summary, and the replay report.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write;
 
+use comfy_table::presets::UTF8_FULL;
+use comfy_table::{CellAlignment, ColumnConstraint, ContentArrangement, Table, Width};
+use crossterm::style::{Color, ResetColor, SetForegroundColor};
 use typ_rs_core::analysis::{
     Interval, IntervalClass, SessionAnalysis, SessionMetrics, WordAnalysis, analyze,
 };
 use typ_rs_core::compose::ComposedPrompt;
 use typ_rs_core::corpus::Corpus;
 use typ_rs_core::metrics::{
-    PatternTransfer, ProbeMetrics, RecentSeries, SessionSummary, SlotAggregate, Sustained,
-    WordPerformance, accumulate_transfer, probe_trend, word_initiation_median_micros,
+    PatternTransfer, ProbeMetrics, ProbeTrend, RecentSeries, SessionSummary, SlotAggregate,
+    Sustained, WordPerformance, accumulate_transfer, probe_trend, word_initiation_median_micros,
     word_performances,
 };
-use typ_rs_core::model::{ModelState, PatternEstimate, ROOT, SchedulerConfig, Weakness};
+use typ_rs_core::model::{
+    ModelState, PatternEstimate, ROOT, SchedulerConfig, Weakness, WeaknessComponents,
+};
 use typ_rs_core::scheduler::{TargetRole, TrainingHistory, eligible_patterns};
 use typ_rs_core::session::{EventKind, Outcome, SessionState};
 use typ_rs_store::{SessionId, StoredSession};
@@ -25,6 +30,23 @@ const LISTED_PATTERNS: usize = 10;
 
 /// How many probe words the rolling probe window holds.
 const PROBE_WINDOW: usize = 100;
+
+/// How many sessions the progress view tables.
+const TABLED_SESSIONS: usize = 10;
+
+/// How many sessions apart the two speeds the headline compares are.
+const SPEED_SPAN: usize = 10;
+
+/// How many sessions each of the two accuracies the headline compares
+/// averages over.
+const ACCURACY_SPAN: usize = 5;
+
+/// How many patterns the focus block names.
+const FOCUS_PATTERNS: usize = 5;
+
+/// How many completed sessions the trend charts need; with fewer, the view
+/// says how many more to complete where they would go.
+const CHARTED_SESSIONS: usize = 2;
 
 /// What the results block is made from.
 pub struct Ending<'a> {
@@ -77,13 +99,17 @@ pub fn results(ending: &Ending) -> String {
     out
 }
 
-/// Gross WPM, raw and final accuracy, and consistency.
+/// Gross WPM, raw and final accuracy, and consistency. The accuracies are
+/// labeled as the progress view labels them, so that the two places the
+/// user sees them agree.
 fn figures_line(metrics: &SessionMetrics) -> String {
     let wpm = metrics.gross_wpm.unwrap_or(0.0);
     let raw = 100.0 * metrics.raw_accuracy;
     let final_ = 100.0 * metrics.final_accuracy;
     let consistency = percent_or_dashes(metrics.consistency);
-    format!("{wpm:.0} wpm  {raw:.1}% raw  {final_:.1}% final  {consistency} consistency")
+    format!(
+        "{wpm:.0} wpm  {raw:.1}% accuracy  {final_:.1}% after corrections  {consistency} consistency"
+    )
 }
 
 /// The reference-equivalent WPM and its change against the recent series
@@ -129,9 +155,18 @@ fn wpm_in_column(value: Option<f64>) -> String {
     or_dashes_in_column(value, 3, |v| format!("{v:.0}"))
 }
 
-/// `next:` followed by the next prompt's targets in rank order and its
-/// exploration target, or `none yet` when nothing was selected for it.
+/// `next:` followed by the patterns the next prompt practices, or `none
+/// yet` when nothing was selected for it.
 fn next_line(next: &ComposedPrompt) -> String {
+    match practiced(next) {
+        Some(patterns) => format!("next: {patterns}"),
+        None => "next: none yet".to_string(),
+    }
+}
+
+/// The patterns a prompt practices: its targets in rank order, then its
+/// exploration target in parentheses; `None` when nothing was selected.
+fn practiced(next: &ComposedPrompt) -> Option<String> {
     let targets: Vec<String> = next
         .targets
         .iter()
@@ -144,10 +179,10 @@ fn next_line(next: &ComposedPrompt) -> String {
         .find(|t| t.role == TargetRole::Explore)
         .map(|t| visible(&t.pattern));
     match (targets.is_empty(), explore) {
-        (true, None) => "next: none yet".to_string(),
-        (true, Some(e)) => format!("next: exploring {e}"),
-        (false, None) => format!("next: {}", targets.join(", ")),
-        (false, Some(e)) => format!("next: {} (exploring {e})", targets.join(", ")),
+        (true, None) => None,
+        (true, Some(e)) => Some(format!("exploring {e}")),
+        (false, None) => Some(targets.join(", ")),
+        (false, Some(e)) => Some(format!("{} (exploring {e})", targets.join(", "))),
     }
 }
 
@@ -162,38 +197,14 @@ pub fn session_listing(sessions: &[StoredSession]) -> String {
     }
     let mut out = listing_header();
     for session in sessions {
-        let id = session.id;
-        let when = &session.started_at_local;
-        let words = session.prompt.word_count();
-        let listed = match &session.summary {
-            Some(s) => ListedSession {
-                id,
-                when,
-                words,
-                wpm: s.gross_wpm,
-                reference: s.reference_wpm,
-                raw_accuracy: s.raw_accuracy,
-                consistency: s.consistency,
-            },
-            None => {
-                let m = analyze(&session.replay()).metrics;
-                ListedSession {
-                    id,
-                    when,
-                    words,
-                    wpm: m.gross_wpm,
-                    reference: None,
-                    raw_accuracy: m.raw_accuracy,
-                    consistency: m.consistency,
-                }
-            }
-        };
+        let listed = ListedSession::from_session(session, || analyze(&session.replay()).metrics);
         out.push_str(&listing_row(&listed));
     }
     out
 }
 
-/// One session's figures as the listing shows them.
+/// One session's figures as the listing and the progress view show them.
+#[cfg_attr(test, derive(Clone))]
 struct ListedSession<'a> {
     id: SessionId,
     /// The local start time, `YYYY-MM-DD HH:MM`.
@@ -201,8 +212,52 @@ struct ListedSession<'a> {
     words: usize,
     wpm: Option<f64>,
     reference: Option<f64>,
+    /// The recent-series speed on standard text with the session included.
+    recent_reference: Option<f64>,
     raw_accuracy: f64,
+    final_accuracy: f64,
     consistency: Option<f64>,
+}
+
+impl<'a> ListedSession<'a> {
+    /// The session's figures from its cached summary, or from `metrics`
+    /// when it has none: then its speed on standard text and its recent
+    /// series are unknown.
+    fn from_session(
+        session: &'a StoredSession,
+        metrics: impl FnOnce() -> SessionMetrics,
+    ) -> ListedSession<'a> {
+        let id = session.id;
+        let when = session.started_at_local.as_str();
+        let words = session.prompt.word_count();
+        match &session.summary {
+            Some(s) => ListedSession {
+                id,
+                when,
+                words,
+                wpm: s.gross_wpm,
+                reference: s.reference_wpm,
+                recent_reference: s.recent.reference_wpm,
+                raw_accuracy: s.raw_accuracy,
+                final_accuracy: s.final_accuracy,
+                consistency: s.consistency,
+            },
+            None => {
+                let m = metrics();
+                ListedSession {
+                    id,
+                    when,
+                    words,
+                    wpm: m.gross_wpm,
+                    reference: None,
+                    recent_reference: None,
+                    raw_accuracy: m.raw_accuracy,
+                    final_accuracy: m.final_accuracy,
+                    consistency: m.consistency,
+                }
+            }
+        }
+    }
 }
 
 /// The listing's column labels, each right-aligned over the word that
@@ -250,10 +305,7 @@ pub fn performances(
 /// contaminated probes met among them go on their own line. Empty without
 /// a probe word.
 pub fn probe_section(performances: &[Vec<WordPerformance>]) -> String {
-    let trend = probe_trend(
-        performances.iter().flat_map(|words| words.iter().rev()),
-        PROBE_WINDOW,
-    );
+    let trend = trend(performances);
     if trend.current.words == 0 && trend.contaminated.words == 0 {
         return String::new();
     }
@@ -264,16 +316,8 @@ pub fn probe_section(performances: &[Vec<WordPerformance>]) -> String {
         trend.current.words,
         probe_figures(&trend.current)
     );
-    if let (Some(sustained), Some(previous)) = (trend.sustained, trend.previous) {
-        let _ = write!(
-            out,
-            "  sustained {} from {}",
-            match sustained {
-                Sustained::Improvement => "improvement",
-                Sustained::Decline => "decline",
-            },
-            or_dashes(previous.wpm, |w| format!("{w:.0} wpm"))
-        );
+    if let Some(marker) = sustained_marker(&trend) {
+        let _ = write!(out, "  {marker}");
     }
     out.push('\n');
     if trend.contaminated.words > 0 {
@@ -285,6 +329,28 @@ pub fn probe_section(performances: &[Vec<WordPerformance>]) -> String {
         );
     }
     out
+}
+
+/// The probe trend over the sessions' words, most recent first.
+fn trend(performances: &[Vec<WordPerformance>]) -> ProbeTrend {
+    probe_trend(
+        performances.iter().flat_map(|words| words.iter().rev()),
+        PROBE_WINDOW,
+    )
+}
+
+/// `sustained improvement from N wpm` or `sustained decline from N wpm`
+/// when the evidence supports one.
+fn sustained_marker(trend: &ProbeTrend) -> Option<String> {
+    let (sustained, previous) = trend.sustained.zip(trend.previous)?;
+    Some(format!(
+        "sustained {} from {}",
+        match sustained {
+            Sustained::Improvement => "improvement",
+            Sustained::Decline => "decline",
+        },
+        or_dashes(previous.wpm, |w| format!("{w:.0} wpm"))
+    ))
 }
 
 fn probe_figures(metrics: &ProbeMetrics) -> String {
@@ -483,6 +549,302 @@ fn ranked<'a>(
 /// A pattern with its spaces made visible.
 fn visible(pattern: &str) -> String {
     pattern.replace(' ', "␣")
+}
+
+/// How the progress view is drawn: how many columns it may take and
+/// whether it may use color.
+#[derive(Debug, Clone, Copy)]
+pub struct Rendering {
+    pub width: u16,
+    pub color: bool,
+}
+
+/// What the progress view is made from.
+pub struct Progress<'a> {
+    /// The completed sessions loaded, most recent first: the ten the table
+    /// shows and enough more for the probe windows.
+    pub sessions: &'a [StoredSession],
+    /// Each session's analysis, in the same order.
+    pub analyses: &'a [SessionAnalysis],
+    /// How each word of each session was typed, in the same order.
+    pub performances: &'a [Vec<WordPerformance>],
+    pub model: &'a ModelState,
+    pub corpus: &'a Corpus,
+    pub config: &'a SchedulerConfig,
+    /// The prompt waiting for the next session, if one is.
+    pub waiting: Option<&'a ComposedPrompt>,
+}
+
+/// The user's progress: a headline saying how speed on standard text and
+/// accuracy have moved, a table of the most recent sessions, and the
+/// patterns the trainer is focusing on. `no completed sessions yet` and
+/// nothing else before the first completed session; after one, a line
+/// saying how many more the trend charts need in place of the charts.
+pub fn progress(view: &Progress, rendering: Rendering) -> String {
+    if view.sessions.is_empty() {
+        return "no completed sessions yet\n".to_string();
+    }
+    let figures: Vec<ListedSession> = view
+        .sessions
+        .iter()
+        .zip(view.analyses)
+        .map(|(session, analysis)| {
+            ListedSession::from_session(session, || analysis.metrics.clone())
+        })
+        .collect();
+
+    let mut out = headline(&figures, &trend(view.performances), rendering.color);
+    if figures.len() < CHARTED_SESSIONS {
+        let more = CHARTED_SESSIONS - figures.len();
+        let _ = write!(
+            out,
+            "\ncomplete {more} more {} to see your trend\n",
+            plural(more, "session")
+        );
+    }
+    out.push('\n');
+    out.push_str(&session_table(
+        &figures[..figures.len().min(TABLED_SESSIONS)],
+        rendering.width,
+    ));
+    let focus = focus(
+        view.model,
+        view.corpus,
+        view.config,
+        view.waiting,
+        rendering.width,
+    );
+    if !focus.is_empty() {
+        out.push('\n');
+        out.push_str(&focus);
+    }
+    out
+}
+
+/// Three lines over the sessions given, most recent first. The
+/// recent-series speed on standard text, with its change since the
+/// session ten back, or the oldest when there are fewer; both are taken
+/// among the sessions that have a cached recent series, so a session
+/// stored without a summary is passed over rather than shown as `--`.
+/// The mean raw accuracy of the last five sessions, with its change
+/// against the mean of the sessions before them, up to five, when there
+/// are any. The probe trend: the sustained marker, or why there is none.
+fn headline(figures: &[ListedSession], trend: &ProbeTrend, color: bool) -> String {
+    let recent: Vec<f64> = figures.iter().filter_map(|f| f.recent_reference).collect();
+    let mut out = match recent.first() {
+        None => "-- wpm on standard text".to_string(),
+        Some(current) => {
+            let mut line = format!("{current:.0} wpm on standard text");
+            if recent.len() > 1 {
+                let earlier = recent[SPEED_SPAN.min(recent.len() - 1)];
+                let _ = write!(line, "  {}", delta(current - earlier, 0, color));
+            }
+            line
+        }
+    };
+
+    let mean_accuracy = |sessions: &[ListedSession]| {
+        100.0 * sessions.iter().map(|f| f.raw_accuracy).sum::<f64>() / sessions.len() as f64
+    };
+    let latest = mean_accuracy(&figures[..figures.len().min(ACCURACY_SPAN)]);
+    let _ = write!(out, "\n{latest:.1}% accuracy");
+    if figures.len() > ACCURACY_SPAN {
+        let before = &figures[ACCURACY_SPAN..figures.len().min(2 * ACCURACY_SPAN)];
+        let _ = write!(out, "  {}", delta(latest - mean_accuracy(before), 1, color));
+    }
+
+    let probes = match sustained_marker(trend) {
+        Some(marker) => marker,
+        None if trend.previous.is_some() => "no sustained change on probes yet".to_string(),
+        None => "not enough probes yet to call a trend".to_string(),
+    };
+    let _ = write!(out, "\n{probes}\n");
+    out
+}
+
+/// A change as an arrow and the signed difference to `decimals` places:
+/// `▲ +6` in green, `▼ -2` in red, or `= 0` in the terminal's own color
+/// when the change rounds to nothing.
+fn delta(change: f64, decimals: usize, color: bool) -> String {
+    let signed = format!("{change:+.decimals$}");
+    let magnitude = signed.trim_start_matches(['+', '-']);
+    if magnitude.chars().all(|c| c == '0' || c == '.') {
+        return format!("= {magnitude}");
+    }
+    let (arrow, foreground) = if change > 0.0 {
+        ("▲", Color::Green)
+    } else {
+        ("▼", Color::Red)
+    };
+    if color {
+        format!(
+            "{}{arrow} {signed}{ResetColor}",
+            SetForegroundColor(foreground)
+        )
+    } else {
+        format!("{arrow} {signed}")
+    }
+}
+
+/// A column of a bordered table.
+struct Column {
+    name: &'static str,
+    /// Right-aligned, as numbers are.
+    numeric: bool,
+}
+
+const SESSION_COLUMNS: &[Column] = &[
+    Column {
+        name: "#",
+        numeric: true,
+    },
+    Column {
+        name: "when",
+        numeric: false,
+    },
+    Column {
+        name: "words",
+        numeric: true,
+    },
+    Column {
+        name: "wpm",
+        numeric: true,
+    },
+    Column {
+        name: "on standard text",
+        numeric: true,
+    },
+    Column {
+        name: "accuracy",
+        numeric: true,
+    },
+    Column {
+        name: "after corrections",
+        numeric: true,
+    },
+];
+
+const FOCUS_COLUMNS: &[Column] = &[
+    Column {
+        name: "pattern",
+        numeric: false,
+    },
+    Column {
+        name: "why",
+        numeric: false,
+    },
+];
+
+/// The sessions as a bordered table in the order given: id, local start
+/// time, words, gross WPM, speed on standard text, raw accuracy, and final
+/// accuracy, with `--` where a figure is unknown.
+fn session_table(figures: &[ListedSession], width: u16) -> String {
+    let rows: Vec<Vec<String>> = figures
+        .iter()
+        .map(|f| {
+            vec![
+                f.id.to_string(),
+                f.when.to_string(),
+                f.words.to_string(),
+                or_dashes(f.wpm, |v| format!("{v:.0}")),
+                or_dashes(f.reference, |v| format!("{v:.0}")),
+                format!("{:.1}%", 100.0 * f.raw_accuracy),
+                format!("{:.1}%", 100.0 * f.final_accuracy),
+            ]
+        })
+        .collect();
+    bordered_table(SESSION_COLUMNS, &rows, width)
+}
+
+/// The patterns the trainer is working on: the five eligible patterns the
+/// user has typed with the highest weakness, each tagged with why, then
+/// the patterns the waiting prompt practices. Empty when the model has
+/// observed nothing.
+fn focus(
+    model: &ModelState,
+    corpus: &Corpus,
+    config: &SchedulerConfig,
+    waiting: Option<&ComposedPrompt>,
+    width: u16,
+) -> String {
+    let Some(at) = model.last_update() else {
+        return String::new();
+    };
+    let eligible = eligible_patterns(corpus, config);
+    let mut weakest: Vec<(&str, WeaknessComponents)> = eligible
+        .iter()
+        .filter(|e| model.stats(&e.pattern).is_some())
+        .map(|e| {
+            (
+                e.pattern.as_ref(),
+                model.weakness_components(&e.pattern, at, config),
+            )
+        })
+        .collect();
+    weakest.sort_by(|a, b| {
+        let mean = |(_, components): &(&str, WeaknessComponents)| components.weakness.mean;
+        mean(b).total_cmp(&mean(a)).then_with(|| a.0.cmp(b.0))
+    });
+    weakest.truncate(FOCUS_PATTERNS);
+
+    let mut out = String::from("focus\n");
+    if !weakest.is_empty() {
+        let rows: Vec<Vec<String>> = weakest
+            .iter()
+            .map(|(pattern, components)| vec![visible(pattern), why(components).to_string()])
+            .collect();
+        out.push_str(&bordered_table(FOCUS_COLUMNS, &rows, width));
+    }
+    if let Some(patterns) = waiting.and_then(practiced) {
+        let _ = writeln!(out, "next session practices: {patterns}");
+    }
+    out
+}
+
+/// Why a pattern is weak: `both` when the user is more error-prone and
+/// slower on it than on their typing as a whole, `error-prone` or `slow`
+/// when only one holds, and `slow` when neither does, since the other
+/// components of weakness (inconsistency and hesitation) are about speed.
+fn why(components: &WeaknessComponents) -> &'static str {
+    match (components.error_excess > 0.0, components.speed_excess > 0.0) {
+        (true, true) => "both",
+        (true, false) => "error-prone",
+        (false, _) => "slow",
+    }
+}
+
+/// `rows` under `columns` in a bordered table no wider than `width`,
+/// numeric columns right-aligned. A column is never narrower than its
+/// widest cell, so that a tight width wraps headers but never figures.
+/// The one place the table library is used.
+fn bordered_table(columns: &[Column], rows: &[Vec<String>], width: u16) -> String {
+    let mut table = Table::new();
+    table
+        .load_style(UTF8_FULL)
+        .set_content_arrangement(ContentArrangement::Dynamic)
+        .set_width(width)
+        .set_header(columns.iter().map(|c| c.name));
+    for row in rows {
+        table.add_row(row.iter().map(String::as_str));
+    }
+    for (index, column) in columns.iter().enumerate() {
+        let Some(drawn) = table.column_mut(index) else {
+            continue;
+        };
+        let widest = rows
+            .iter()
+            .map(|row| row[index].chars().count())
+            .max()
+            .unwrap_or(0);
+        let padding = drawn.padding_width();
+        drawn.set_constraint(ColumnConstraint::LowerBoundary(Width::Fixed(
+            widest as u16 + padding,
+        )));
+        if column.numeric {
+            drawn.set_cell_alignment(CellAlignment::Right);
+        }
+    }
+    format!("{table}\n")
 }
 
 /// How a stored session was interpreted: the results as the user saw them,
@@ -763,7 +1125,7 @@ mod tests {
         // 4 of 6 target characters correct; every clean interval is 100 ms.
         assert_eq!(
             run("cat dog", "cat dg "),
-            "120 wpm  83.3% raw  66.7% final  100% consistency"
+            "120 wpm  83.3% accuracy  66.7% after corrections  100% consistency"
         );
     }
 
@@ -773,7 +1135,7 @@ mod tests {
         // the keystrokes after it. 3 final characters over 0.4 s is 90 wpm.
         assert_eq!(
             run("cat", "cx⌫at"),
-            "90 wpm  66.7% raw  100.0% final  -- consistency"
+            "90 wpm  66.7% accuracy  100.0% after corrections  -- consistency"
         );
     }
 
@@ -955,7 +1317,9 @@ mod tests {
             words: 2,
             wpm: Some(140.0),
             reference,
+            recent_reference: reference,
             raw_accuracy: 1.0,
+            final_accuracy: 1.0,
             consistency,
         }
     }
@@ -991,6 +1355,306 @@ mod tests {
             "   2  2024-01-16 08:00    2 words  140 wpm   -- on standard text  100.0% raw    -- consistency\n"
         );
         assert_eq!(full.len(), sparse.len());
+    }
+
+    // --- The progress view -------------------------------------------------
+
+    #[test]
+    fn a_change_is_an_arrow_and_the_signed_difference_judged_after_rounding() {
+        assert_eq!(delta(6.4, 0, false), "▲ +6");
+        assert_eq!(delta(-2.0, 0, false), "▼ -2");
+        assert_eq!(delta(0.3, 0, false), "= 0");
+        assert_eq!(delta(-0.3, 0, false), "= 0");
+        assert_eq!(delta(1.26, 1, false), "▲ +1.3");
+        assert_eq!(delta(-0.04, 1, false), "= 0.0");
+    }
+
+    #[test]
+    fn a_change_is_green_up_red_down_and_plain_at_zero_when_color_is_on() {
+        crossterm::style::Colored::set_ansi_color_disabled(false);
+        let up = delta(6.0, 0, true);
+        assert!(up.starts_with("\x1b[38;5;10m▲ +6"), "{up:?}");
+        assert!(up.ends_with("\x1b[0m"), "{up:?}");
+        let down = delta(-2.0, 0, true);
+        assert!(down.starts_with("\x1b[38;5;9m▼ -2"), "{down:?}");
+        assert!(down.ends_with("\x1b[0m"), "{down:?}");
+        assert_eq!(delta(0.0, 0, true), "= 0");
+    }
+
+    /// A session's figures for the headline: its recent-series speed on
+    /// standard text and its raw accuracy.
+    fn figures(recent_reference: Option<f64>, raw_accuracy: f64) -> ListedSession<'static> {
+        ListedSession {
+            recent_reference,
+            raw_accuracy,
+            ..listed(Some(120.0), Some(1.0))
+        }
+    }
+
+    fn no_trend() -> ProbeTrend {
+        ProbeTrend {
+            current: ProbeMetrics::default(),
+            contaminated: ProbeMetrics::default(),
+            previous: None,
+            sustained: None,
+        }
+    }
+
+    #[test]
+    fn the_headline_shows_speed_and_accuracy_without_changes_for_one_session() {
+        assert_eq!(
+            headline(&[figures(Some(118.4), 0.964)], &no_trend(), false),
+            "118 wpm on standard text\n\
+             96.4% accuracy\n\
+             not enough probes yet to call a trend\n"
+        );
+        assert_eq!(
+            headline(&[figures(None, 1.0)], &no_trend(), false)
+                .lines()
+                .next()
+                .unwrap(),
+            "-- wpm on standard text"
+        );
+    }
+
+    #[test]
+    fn the_headline_compares_speed_with_the_oldest_session_until_there_are_eleven() {
+        // Most recent first: the speed is compared with the oldest session's
+        // recent series, skipping a session that has none.
+        let three = [
+            figures(Some(124.0), 1.0),
+            figures(None, 1.0),
+            figures(Some(118.0), 1.0),
+        ];
+        assert_eq!(
+            headline(&three, &no_trend(), false).lines().next().unwrap(),
+            "124 wpm on standard text  ▲ +6"
+        );
+        // From eleven on, with the session ten back.
+        let mut twelve: Vec<ListedSession> = (0..12)
+            .map(|i| figures(Some(100.0 + i as f64), 1.0))
+            .collect();
+        assert_eq!(
+            headline(&twelve, &no_trend(), false)
+                .lines()
+                .next()
+                .unwrap(),
+            "100 wpm on standard text  ▼ -10"
+        );
+        twelve[10].recent_reference = Some(100.0);
+        assert_eq!(
+            headline(&twelve, &no_trend(), false)
+                .lines()
+                .next()
+                .unwrap(),
+            "100 wpm on standard text  = 0"
+        );
+    }
+
+    #[test]
+    fn the_headline_compares_the_accuracy_of_the_last_five_sessions_with_the_five_before() {
+        // Five sessions: nothing to compare with.
+        let five: Vec<ListedSession> = (0..5).map(|_| figures(Some(120.0), 0.95)).collect();
+        assert_eq!(
+            headline(&five, &no_trend(), false).lines().nth(1).unwrap(),
+            "95.0% accuracy"
+        );
+        // Seven: the last five against the two before them.
+        let mut seven = five.clone();
+        seven.push(figures(Some(120.0), 0.90));
+        seven.push(figures(Some(120.0), 0.92));
+        assert_eq!(
+            headline(&seven, &no_trend(), false).lines().nth(1).unwrap(),
+            "95.0% accuracy  ▲ +4.0"
+        );
+        // Twelve: the sessions beyond the tenth are not compared.
+        let mut twelve = seven.clone();
+        twelve.extend((0..3).map(|_| figures(Some(120.0), 0.99)));
+        twelve.extend((0..2).map(|_| figures(Some(120.0), 0.10)));
+        assert_eq!(
+            headline(&twelve, &no_trend(), false)
+                .lines()
+                .nth(1)
+                .unwrap(),
+            "95.0% accuracy  ▼ -0.8"
+        );
+    }
+
+    #[test]
+    fn the_headline_names_the_probe_trend_when_there_is_one() {
+        let window = ProbeMetrics {
+            words: 100,
+            wpm: Some(120.0),
+            raw_accuracy: Some(1.0),
+        };
+        let previous = ProbeMetrics {
+            wpm: Some(60.0),
+            ..window
+        };
+        let improving = ProbeTrend {
+            current: window,
+            contaminated: ProbeMetrics::default(),
+            previous: Some(previous),
+            sustained: Some(Sustained::Improvement),
+        };
+        let one = [figures(Some(120.0), 1.0)];
+        assert_eq!(
+            headline(&one, &improving, false).lines().nth(2).unwrap(),
+            "sustained improvement from 60 wpm"
+        );
+        let declining = ProbeTrend {
+            sustained: Some(Sustained::Decline),
+            ..improving
+        };
+        assert_eq!(
+            headline(&one, &declining, false).lines().nth(2).unwrap(),
+            "sustained decline from 60 wpm"
+        );
+        let steady = ProbeTrend {
+            sustained: None,
+            ..improving
+        };
+        assert_eq!(
+            headline(&one, &steady, false).lines().nth(2).unwrap(),
+            "no sustained change on probes yet"
+        );
+    }
+
+    #[test]
+    fn the_session_table_has_a_header_row_and_right_aligned_figures_and_placeholders() {
+        let full = ListedSession {
+            final_accuracy: 0.9876,
+            ..listed(Some(120.0), Some(1.0))
+        };
+        let sparse = ListedSession {
+            id: "13".parse().unwrap(),
+            wpm: None,
+            raw_accuracy: 0.8333,
+            ..listed(None, None)
+        };
+        assert_eq!(
+            session_table(&[full, sparse], 100),
+            "┌────┬──────────────────┬───────┬─────┬──────────────────┬──────────┬───────────────────┐\n\
+             │  # ┆ when             ┆ words ┆ wpm ┆ on standard text ┆ accuracy ┆ after corrections │\n\
+             ╞════╪══════════════════╪═══════╪═════╪══════════════════╪══════════╪═══════════════════╡\n\
+             │  2 ┆ 2024-01-16 08:00 ┆     2 ┆ 140 ┆              120 ┆   100.0% ┆             98.8% │\n\
+             ├╌╌╌╌┼╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌┼╌╌╌╌╌╌╌┼╌╌╌╌╌┼╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌┼╌╌╌╌╌╌╌╌╌╌┼╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌┤\n\
+             │ 13 ┆ 2024-01-16 08:00 ┆     2 ┆  -- ┆               -- ┆    83.3% ┆            100.0% │\n\
+             └────┴──────────────────┴───────┴─────┴──────────────────┴──────────┴───────────────────┘\n"
+        );
+    }
+
+    #[test]
+    fn the_focus_tag_follows_the_error_and_speed_excess() {
+        let components = |error_excess: f64, speed_excess: f64| WeaknessComponents {
+            error_excess,
+            speed_excess,
+            inconsistency: 0.5,
+            hesitation_excess: 0.5,
+            weakness: Weakness { mean: 1.0, sd: 0.1 },
+        };
+        assert_eq!(why(&components(0.2, 0.1)), "both");
+        assert_eq!(why(&components(0.2, 0.0)), "error-prone");
+        assert_eq!(why(&components(0.0, 0.1)), "slow");
+        assert_eq!(why(&components(-0.1, -0.1)), "slow");
+    }
+
+    #[test]
+    fn the_practiced_patterns_are_the_targets_in_rank_order_then_the_exploration_target() {
+        assert_eq!(practiced(&next_with(vec![])), None);
+        assert_eq!(
+            practiced(&next_with(vec![target("ou", TargetRole::Explore)])).as_deref(),
+            Some("exploring ou")
+        );
+        assert_eq!(
+            practiced(&next_with(vec![
+                target(" th", TargetRole::Target),
+                target("he", TargetRole::Deferred),
+                target("e ", TargetRole::Target),
+            ]))
+            .as_deref(),
+            Some("␣th, e␣")
+        );
+        assert_eq!(
+            practiced(&next_with(vec![
+                target(" th", TargetRole::Target),
+                target("ou", TargetRole::Explore),
+            ]))
+            .as_deref(),
+            Some("␣th (exploring ou)")
+        );
+    }
+
+    #[test]
+    fn the_focus_block_is_empty_until_something_has_been_observed() {
+        let config = SchedulerConfig::default();
+        let waiting = next_with(vec![target("th", TargetRole::Target)]);
+        assert_eq!(
+            focus(
+                &ModelState::new(),
+                Corpus::bundled(),
+                &config,
+                Some(&waiting),
+                80
+            ),
+            ""
+        );
+    }
+
+    #[test]
+    fn the_focus_block_tags_the_weakest_patterns_and_names_the_next_practice() {
+        let config = SchedulerConfig::default();
+        let mut model = ModelState::new();
+        // `x` typed for `o` in "dog" makes the chain ending at `o` the
+        // weakest, for its errors; nothing was slow.
+        let mut state = SessionState::new(Prompt::new(["cat", "dog"]), EndCondition::AfterWords(2));
+        for (i, c) in "cat dxg ".chars().enumerate() {
+            state.apply_event(Input::new(i as u64 * 100_000, Key::Char(c)));
+        }
+        model.apply_session(&state, 1_000, Corpus::bundled(), &config);
+
+        let waiting = next_with(vec![
+            target(" do", TargetRole::Target),
+            target("do", TargetRole::Target),
+            target("ou", TargetRole::Explore),
+        ]);
+        let block = focus(&model, Corpus::bundled(), &config, Some(&waiting), 80);
+        let lines: Vec<&str> = block.lines().collect();
+        assert_eq!(lines[0], "focus", "{block}");
+        assert_eq!(lines[2], "│ pattern ┆ why         │", "{block}");
+        assert_eq!(lines[4], "│ ␣do     ┆ error-prone │", "{block}");
+        assert_eq!(
+            lines.last().unwrap(),
+            &"next session practices: ␣do, do (exploring ou)",
+            "{block}"
+        );
+        // Five patterns, each on a row of its own between rules.
+        assert_eq!(lines.len(), 2 + 2 + 5 * 2 + 1, "{block}");
+
+        let without_waiting = focus(&model, Corpus::bundled(), &config, None, 80);
+        assert!(
+            !without_waiting.contains("next session"),
+            "{without_waiting}"
+        );
+        assert!(without_waiting.ends_with("┘\n"), "{without_waiting}");
+    }
+
+    #[test]
+    fn the_progress_view_says_so_without_a_completed_session() {
+        let view = Progress {
+            sessions: &[],
+            analyses: &[],
+            performances: &[],
+            model: &ModelState::new(),
+            corpus: Corpus::bundled(),
+            config: &SchedulerConfig::default(),
+            waiting: None,
+        };
+        let rendering = Rendering {
+            width: 80,
+            color: false,
+        };
+        assert_eq!(progress(&view, rendering), "no completed sessions yet\n");
     }
 
     #[test]

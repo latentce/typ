@@ -29,9 +29,14 @@ const MIN_COLUMNS: u16 = 20;
 /// How many completed sessions `typ inspect` lists.
 const LISTED_SESSIONS: usize = 10;
 
-/// How many completed sessions `typ inspect` reads probe words from:
-/// enough for two full probe windows once prompts are mostly targeted.
+/// How many completed sessions `typ stats` and `typ inspect` read probe
+/// words from: enough for two full probe windows once prompts are mostly
+/// targeted.
 const PROBE_SESSIONS: usize = 50;
+
+/// How many columns `typ stats` lays its tables out in when stdout is not
+/// a terminal.
+const DEFAULT_COLUMNS: u16 = 80;
 
 const DATABASE_FILE: &str = "typ.db";
 
@@ -63,9 +68,9 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
-    /// Show your progress: recent sessions, probe and word-initiation
-    /// trends, transfer to untargeted words, the patterns you are weakest
-    /// on, and the candidates being held back
+    /// Show your progress: how your speed on standard text and your
+    /// accuracy have moved, your recent sessions, and the patterns being
+    /// worked on
     Stats,
     /// Show the model's view: what the trainer believes about your
     /// patterns, with the evidence behind each estimate, and the
@@ -82,7 +87,7 @@ enum Command {
     /// Show how a stored session was interpreted: every word's first
     /// attempt and attributed errors, and every interval's classification
     Replay {
-        /// The session id, as listed by `typ inspect`
+        /// The session id, as shown by `typ stats` and `typ inspect`
         session_id: SessionId,
         /// Instead, show where the current pipeline's figures for the
         /// session differ from the ones stored for it
@@ -112,7 +117,8 @@ fn main() -> ExitCode {
     let outcome = match cli.command {
         None => session(cli.words.as_deref(), profile),
         Some(_) if cli.words.is_some() => Err("--words applies only to a session".into()),
-        Some(Command::Stats | Command::Inspect) => inspect(profile),
+        Some(Command::Stats) => stats(profile),
+        Some(Command::Inspect) => inspect(profile),
         Some(Command::Config { key, value }) => config(profile, key, value),
         Some(Command::Rebuild | Command::Replay { .. }) if profile.is_some() => {
             Err("--profile applies only to a session, stats, inspect, or config".into())
@@ -325,9 +331,51 @@ fn end_session(store: &mut Store, profile: &Profile, run: &FinishedRun) -> Ended
     }
 }
 
+/// Prints a profile's progress: how the user's speed on standard text and
+/// accuracy have moved, their recent sessions, and the patterns the
+/// trainer is focusing on. Reads the same sessions `inspect` does, so the
+/// probe trend is the one it reports.
+fn stats(profile: Option<&str>) -> Result<(), Box<dyn Error>> {
+    let mut store = open_store()?;
+    let profile = open_profile(&mut store, profile)?;
+    let sessions = store.completed_sessions(&profile, PROBE_SESSIONS)?;
+    let analyses = report::analyses(&sessions);
+    let performances = report::performances(&sessions, &analyses);
+    let model = store.model(&profile)?;
+    let waiting = store.waiting_prompt(&profile)?;
+    let view = report::Progress {
+        sessions: &sessions,
+        analyses: &analyses,
+        performances: &performances,
+        model: &model,
+        corpus: Corpus::bundled(),
+        config: store.config(),
+        waiting: waiting.as_ref(),
+    };
+    print!("{}", report::progress(&view, rendering()));
+    Ok(())
+}
+
+/// How wide to draw for stdout and whether to color it: the terminal's
+/// width and colors when stdout is one, unless `NO_COLOR` is set; a fixed
+/// width and no color when it is a pipe or a file.
+fn rendering() -> report::Rendering {
+    let terminal = std::io::stdout().is_terminal();
+    let width = if terminal {
+        crossterm::terminal::size().map_or(DEFAULT_COLUMNS, |(columns, _)| columns)
+    } else {
+        DEFAULT_COLUMNS
+    };
+    let palette = Palette::from_no_color(std::env::var("NO_COLOR").ok().as_deref());
+    report::Rendering {
+        width,
+        color: terminal && palette == Palette::Color,
+    }
+}
+
 /// Prints the model's view of a profile: the recent sessions, the probe and
 /// word-initiation trends, transfer to untargeted words, and what the model
-/// believes about the user's patterns. `typ stats` prints the same report.
+/// believes about the user's patterns.
 fn inspect(profile: Option<&str>) -> Result<(), Box<dyn Error>> {
     let mut store = open_store()?;
     let profile = open_profile(&mut store, profile)?;
@@ -575,7 +623,7 @@ mod tests {
         let lines: Vec<&str> = ended.results.lines().collect();
         assert_eq!(
             lines[0],
-            "140 wpm  100.0% raw  100.0% final  100% consistency"
+            "140 wpm  100.0% accuracy  100.0% after corrections  100% consistency"
         );
         assert!(
             lines[1].ends_with(" wpm on standard text  baseline recorded"),
@@ -591,7 +639,7 @@ mod tests {
         let lines: Vec<&str> = again.results.lines().collect();
         assert_eq!(
             lines[0],
-            "140 wpm  100.0% raw  100.0% final  100% consistency"
+            "140 wpm  100.0% accuracy  100.0% after corrections  100% consistency"
         );
         assert!(lines[1].contains(" vs recent"), "{}", lines[1]);
         assert!(lines[2].starts_with("next: "), "{}", lines[2]);

@@ -17,6 +17,7 @@ path = "src/main.rs"
 typ-rs-core = { workspace = true }
 typ-rs-store = { workspace = true }
 clap = { workspace = true }
+comfy-table = { workspace = true }
 crossterm = { workspace = true }
 dirs = { workspace = true }
 getrandom = { workspace = true }

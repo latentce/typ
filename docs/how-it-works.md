@@ -77,7 +77,8 @@ that places errors latest in the word wins; if still tied, blame is split.
 
 **Raw accuracy** is first-attempt correct characters over all characters.
 **Final accuracy** is what you submitted after corrections. Raw is the
-training signal; final is just reported.
+training signal; final is just reported. On screen they are `accuracy` and
+`after corrections`.
 
 ## 2. Per-pattern statistics
 

@@ -7,7 +7,7 @@ slow you down or trip you up, and builds each practice prompt around them.
 $ typ
 the quick brown fox jumps over the lazy dog ...
 
-68 wpm  96.2% raw  99.4% final  71% consistency
+68 wpm  96.2% accuracy  99.4% after corrections  71% consistency
 74 wpm on standard text  +3 vs recent
 next: th, ou␣, ing (exploring ␣wr)
 ```
@@ -55,7 +55,7 @@ When you finish, three lines print:
 
 | Line | Meaning |
 | --- | --- |
-| `68 wpm  96.2% raw  99.4% final  71% consistency` | Gross WPM; accuracy on your first try at each character; accuracy of what you submitted after corrections; how even your keystroke timing was. |
+| `68 wpm  96.2% accuracy  99.4% after corrections  71% consistency` | Gross WPM; accuracy on your first try at each character; accuracy of what you submitted after corrections; how even your keystroke timing was. |
 | `74 wpm on standard text  +3 vs recent` | Your speed translated to ordinary text. Targeted prompts are deliberately harder, so raw WPM drops when targeting kicks in; this figure corrects for that and is the one to watch. `baseline recorded` on your first session. |
 | `next: th, ou␣, ing (exploring ␣wr)` | The patterns the next prompt will practice, weakest first, plus one the model is merely unsure about. `␣` is a space, so `ou␣` means "words ending in ou". |
 
@@ -96,18 +96,22 @@ you chose, and hands the terminal its own cursor back when the session ends.
 typ stats
 ```
 
-Shows your last ten sessions, then:
+Your progress view. It opens with a headline: your speed on standard text
+and your accuracy, each with how it has moved (`▲ +6` in green, `▼ -2` in
+red) against your recent sessions, and whether your probe words show a
+`sustained improvement` or `sustained decline`, a marker given only when
+the change is statistically separable from the hundred probe words before.
+Speed is the recent trend of your speed on standard text, not the raw WPM of
+the last prompt, so a hard practice prompt never makes you look slower than
+you are.
 
-- **probes**: speed and accuracy over your last hundred "probe" words (words
-  chosen at random, not for practice), marked `sustained improvement` or
-  `sustained decline` only when the change is statistically separable from
-  the hundred before.
-- **word initiation**: median time to start each word, per session.
-- **transfer to untargeted words**: for each recently practiced pattern, how
-  you type it in words used for drilling versus words that were not.
-- **slowest / most error-prone / weakest patterns**, each with how much
-  evidence backs the estimate.
-- **deferred candidates**: patterns being held back as controls.
+Below that: a table of your last ten sessions (id, when, words, wpm, speed
+on standard text, accuracy, and accuracy after corrections), then a **focus**
+block naming the five patterns the trainer is working on, each tagged
+`slow`, `error-prone`, or `both`, and the patterns your next session will
+practice. Charts of the two trends appear once you have two sessions.
+
+The session ids are what `typ replay` takes.
 
 ```
 typ inspect            # the model's view: what it believes about your patterns, with the evidence
@@ -118,13 +122,17 @@ typ rebuild            # recompute every statistic from stored sessions
 
 Every statistic is a cache over the raw keystroke log. `rebuild` is safe to
 run any time, and runs automatically after an upgrade that changes the
-algorithm.
+algorithm. `inspect` prints what the model believes in full: the probe
+windows, word-initiation medians per session, transfer from drilled words to
+untargeted ones, the slowest, most error-prone, and weakest patterns with the
+evidence behind each estimate, and the candidates being held back as
+controls.
 
 ### Environment
 
 | Variable | Effect |
 | --- | --- |
-| `NO_COLOR` | Bold and underline instead of color. |
+| `NO_COLOR` | Bold and underline instead of color while typing; no color in `typ stats`. |
 | `TYP_DATA_DIR` | Use this directory for the database instead of the default. |
 
 Data lives in one file: `~/.local/share/typ/typ.db` on Linux,
