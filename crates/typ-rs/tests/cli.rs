@@ -582,7 +582,7 @@ fn stats_with_rising_speed_shows_the_change_charts_the_trends_and_tables_the_ses
     assert!(speed_labels[0] - speed_labels[1] >= 20, "{speed}");
     let accuracy_labels = chart_labels(accuracy);
     assert_eq!(accuracy_labels[0], 100, "{accuracy}");
-    assert!(accuracy_labels[1] % 5 == 0, "{accuracy}");
+    assert!(accuracy_labels[1].is_multiple_of(5), "{accuracy}");
     assert!(accuracy_labels[1] <= 80, "{accuracy}");
     assert!(!run.stdout.contains('\x1b'), "{}", run.stdout);
 

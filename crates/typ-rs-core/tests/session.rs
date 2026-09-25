@@ -438,10 +438,10 @@ fn random_input(rng: &mut ChaCha8Rng, at: u64) -> Input {
         _ => Key::Interrupt,
     };
     let mut input = Input::new(at, key);
-    if rng.next_u32() % 20 == 0 {
+    if rng.next_u32().is_multiple_of(20) {
         input = input.in_paste();
     }
-    if rng.next_u32() % 10 == 0 {
+    if rng.next_u32().is_multiple_of(10) {
         input = input.burst();
     }
     input

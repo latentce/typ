@@ -499,7 +499,7 @@ impl ModelState {
         if completed {
             self.context.completed_sessions += 1;
             let cadence = config.context_refit_sessions;
-            if cadence > 0 && self.context.completed_sessions as usize % cadence == 0 {
+            if cadence > 0 && (self.context.completed_sessions as usize).is_multiple_of(cadence) {
                 self.refit_context(started_at, config);
             }
         }
