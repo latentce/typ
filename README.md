@@ -98,33 +98,36 @@ typ stats
 
 Your progress view. It opens with a headline: your speed on standard text
 and your accuracy, each with how it has moved (`▲ +6` in green, `▼ -2` in
-red) against your recent sessions, and whether your probe words show a
+red) against your session ten back, and whether your probe words show a
 `sustained improvement` or `sustained decline`, a marker given only when
 the change is statistically separable from the hundred probe words before.
-Speed is the recent trend of your speed on standard text, not the raw WPM of
-the last prompt, so a hard practice prompt never makes you look slower than
-you are.
+Both figures are your **recent average**: newer sessions weigh more, one
+five sessions back half as much as the latest, so one bad session nudges
+the figure rather than swinging it. Speed is that average of your speed on
+standard text, not the raw WPM of the last prompt, so a hard practice
+prompt never makes you look slower than you are.
 
 Below that, once you have two sessions, two charts: your speed on standard
 text, then your accuracy, over your recent sessions, oldest on the left.
-Each is a framed box with a legend: every session is a `•`, and the trend is
-the line drawn through them, so a single noisy session stands apart from
-where you are heading: the speed line is your recent series, the accuracy
-line the mean of your last five sessions. The two charts share one session
-axis, each session in the same column of both, so a session's speed and
-accuracy sit one above the other; the footer names the first and last
-sessions shown as `#id · date`. The speed chart plots speed on standard
-text rather than the WPM of each prompt, for the same reason as the
-headline: practice prompts differ in difficulty from session to session, so
-the prompt's own WPM would draw a hard prompt as a slow day. (A session
-whose speed on standard text is not yet known leaves a gap in that chart,
-which the line runs across, rather than being drawn at zero.) The boxes
-grow with the number of sessions up to a fixed size and shrink only in a
-terminal narrower than that; a wider terminal does not stretch them. The
-accuracy axis runs from just below your lowest recent accuracy to 100, so
-small differences stay visible instead of being squashed into the top of
-the box. The trend line is green where color is available and the charts
-read the same without it.
+Each is a framed box with a legend: every session is a `•`, and the line
+drawn through them is your recent average, the same figure the headline
+shows and the same rule in both charts, so a single noisy session stands
+apart from where you are heading. A line beneath the charts says how the
+average weighs sessions. The two charts share one session axis, each
+session in the same column of both, so a session's speed and accuracy sit
+one above the other; the footer names the first and last sessions shown
+as `#id · date`. The speed chart plots speed on standard text rather than
+the WPM of each prompt, for the same reason as the headline: practice
+prompts differ in difficulty from session to session, so the prompt's own
+WPM would draw a hard prompt as a slow day. (A session whose speed on
+standard text is not yet known leaves a gap in that chart, which the line
+runs across, rather than being drawn at zero.) The boxes grow with the
+number of sessions up to a fixed size and shrink only in a terminal
+narrower than that; a wider terminal does not stretch them. The accuracy
+axis runs from just below your lowest recent accuracy to 100, so small
+differences stay visible instead of being squashed into the top of the
+box. The line is green where color is available and the charts read the
+same without it.
 
 Then a table of your last ten sessions (id, when, words, wpm, speed on
 standard text, accuracy, and accuracy after corrections), and a **focus**
@@ -143,11 +146,15 @@ typ rebuild            # recompute every statistic from stored sessions
 
 Every statistic is a cache over the raw keystroke log. `rebuild` is safe to
 run any time, and runs automatically after an upgrade that changes the
-algorithm. `inspect` prints what the model believes in full: the probe
-windows, word-initiation medians per session, transfer from drilled words to
-untargeted ones, the slowest, most error-prone, and weakest patterns with the
-evidence behind each estimate, and the candidates being held back as
-controls.
+algorithm. After upgrading to this version, run it once by hand so that
+your older sessions gain the recent accuracy: until then the accuracy
+average starts from the first session recorded after the upgrade, `typ
+stats` says so under the charts, and the rebuild changes those post-upgrade
+averages too, since they then include the earlier history. `inspect`
+prints what the model believes in full: the probe windows, word-initiation
+medians per session, transfer from drilled words to untargeted ones, the
+slowest, most error-prone, and weakest patterns with the evidence behind
+each estimate, and the candidates being held back as controls.
 
 ### Environment
 

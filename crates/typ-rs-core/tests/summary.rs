@@ -83,6 +83,7 @@ fn series(value: f64) -> RecentSeries {
         wpm: Some(value),
         adjusted_ratio: Some(value),
         reference_wpm: Some(value),
+        raw_accuracy: Some(value),
     }
 }
 
@@ -112,11 +113,36 @@ fn a_figure_a_session_lacks_leaves_its_average_as_it_was() {
         wpm: Some(200.0),
         adjusted_ratio: None,
         reference_wpm: None,
+        raw_accuracy: None,
     };
     let recent = series(100.0).advanced(&missing, 5.0);
     assert!(recent.wpm.unwrap() > 100.0);
     assert_eq!(recent.adjusted_ratio, Some(100.0));
     assert_eq!(recent.reference_wpm, Some(100.0));
+    assert_eq!(recent.raw_accuracy, Some(100.0));
+}
+
+#[test]
+fn raw_accuracy_is_advanced_like_the_speed_figures() {
+    let only_accuracy = |value: f64| RecentSeries {
+        raw_accuracy: Some(value),
+        ..RecentSeries::default()
+    };
+    // The first is taken as it is.
+    let first = RecentSeries::default().advanced(&only_accuracy(0.9), 5.0);
+    assert_eq!(first, only_accuracy(0.9));
+    // Then one step is the half-life's share of the gap, about 0.1294 at
+    // half-life five, and the speed figures are untouched.
+    let alpha = 1.0 - 0.5f64.powf(0.2);
+    assert!(close(alpha, 0.129_449_436_703_875_6), "{alpha}");
+    let second = series(100.0).advanced(&only_accuracy(1.0), 5.0);
+    assert!(
+        close(second.raw_accuracy.unwrap(), 100.0 + alpha * (1.0 - 100.0)),
+        "{second:?}"
+    );
+    assert_eq!(second.wpm, Some(100.0));
+    assert_eq!(second.adjusted_ratio, Some(100.0));
+    assert_eq!(second.reference_wpm, Some(100.0));
 }
 
 // --- Session summary -----------------------------------------------------------
@@ -164,6 +190,7 @@ fn the_first_completed_session_records_its_own_figures_as_the_baseline() {
             wpm: summary.gross_wpm,
             adjusted_ratio: summary.adjusted_ratio,
             reference_wpm: summary.reference_wpm,
+            raw_accuracy: Some(summary.raw_accuracy),
         }
     );
     // "cat" is the one uncontaminated probe: 4 characters with its space
@@ -197,6 +224,7 @@ fn a_later_session_advances_the_recent_series_from_the_previous_one() {
         wpm: Some(100.0),
         adjusted_ratio: Some(1.0),
         reference_wpm: Some(100.0),
+        raw_accuracy: Some(0.9),
     };
     let summary = summarize(
         &state,
@@ -211,11 +239,20 @@ fn a_later_session_advances_the_recent_series_from_the_previous_one() {
             wpm: summary.gross_wpm,
             adjusted_ratio: summary.adjusted_ratio,
             reference_wpm: summary.reference_wpm,
+            raw_accuracy: Some(summary.raw_accuracy),
         },
         config().recent_half_life_sessions,
     );
     assert_eq!(summary.recent, expected);
     assert!(summary.recent.wpm.unwrap() > 100.0);
+    // A perfect session moves the recent accuracy up from 0.9 by the
+    // half-life's share of the gap, not all the way.
+    assert_eq!(summary.raw_accuracy, 1.0);
+    let recent_accuracy = summary.recent.raw_accuracy.unwrap();
+    assert!(
+        recent_accuracy > 0.9 && recent_accuracy < 1.0,
+        "{recent_accuracy}"
+    );
 }
 
 // --- Word performance ----------------------------------------------------------

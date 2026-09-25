@@ -265,7 +265,7 @@ fn opening_an_empty_file_runs_the_migrations_and_creates_the_default_profile() {
         .unwrap()
         .collect::<Result<_, _>>()
         .unwrap();
-    assert_eq!(versions, vec![1, 2, 3, 4, 5, 6]);
+    assert_eq!(versions, vec![1, 2, 3, 4, 5, 6, 7]);
 
     let tables: Vec<String> = conn
         .prepare("SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name")
@@ -304,7 +304,7 @@ fn reopening_does_not_rerun_migrations_or_duplicate_the_default_profile() {
     let profiles: i64 = conn
         .query_row("SELECT count(*) FROM profiles", [], |r| r.get(0))
         .unwrap();
-    assert_eq!((migrations, profiles), (6, 1));
+    assert_eq!((migrations, profiles), (7, 1));
 }
 
 #[test]
@@ -1806,6 +1806,7 @@ fn a_completed_session_caches_its_summary_and_an_interrupted_one_does_not() {
     // The first completed session is its own baseline.
     assert_eq!(summary.recent.wpm, summary.gross_wpm);
     assert_eq!(summary.recent.reference_wpm, summary.reference_wpm);
+    assert_eq!(summary.recent.raw_accuracy, Some(summary.raw_accuracy));
     assert_eq!(store.recent_series(&profile).unwrap(), Some(summary.recent));
     let (rows, version): (i64, i64) = Connection::open(&path)
         .unwrap()
@@ -1845,12 +1846,61 @@ fn the_recent_series_advances_with_each_completed_session() {
             wpm: second.gross_wpm,
             adjusted_ratio: second.adjusted_ratio,
             reference_wpm: second.reference_wpm,
+            raw_accuracy: Some(second.raw_accuracy),
         },
         store.config().recent_half_life_sessions,
     );
     assert_eq!(second.recent, expected);
     assert!(second.recent.wpm.unwrap() > 140.0 && second.recent.wpm.unwrap() < 280.0);
     assert_eq!(store.recent_series(&profile).unwrap(), Some(second.recent));
+}
+
+#[test]
+fn a_summary_cached_before_accuracy_joined_the_recent_series_reads_back_without_it() {
+    let (_dir, path) = temp_db();
+    let (mut store, profile) = open(&path);
+    let (first, _) = type_session(&mut store, &profile, 1_000, "cat dog", "cat dg ", "fox");
+    let (second, _) = type_session(&mut store, &profile, 2_000, "cat dog", "cat dog", "fox");
+    type_session(&mut store, &profile, 3_000, "cat dog", "ca⎋", "fox");
+    let before = store.session(second).unwrap().summary.unwrap();
+    assert!(before.recent.raw_accuracy.is_some());
+
+    // A row written before the column existed has NULL there.
+    sql(
+        &path,
+        "UPDATE session_metrics SET recent_raw_accuracy = NULL",
+    );
+    let (store, profile) = open(&path);
+    let stale = store.session(second).unwrap().summary.unwrap();
+    assert_eq!(stale.recent.raw_accuracy, None);
+    assert_eq!(
+        stale.recent,
+        RecentSeries {
+            raw_accuracy: None,
+            ..before.recent
+        }
+    );
+    assert_eq!(
+        store.recent_series(&profile).unwrap(),
+        Some(stale.recent),
+        "the next session would start the accuracy average afresh"
+    );
+
+    // A rebuild recomputes every summary and so fills the figure in.
+    let mut store = store;
+    assert_eq!(store.rebuild().unwrap(), 3);
+    let rebuilt_first = store.session(first).unwrap().summary.unwrap();
+    let rebuilt_second = store.session(second).unwrap().summary.unwrap();
+    assert_eq!(
+        rebuilt_first.recent.raw_accuracy,
+        Some(rebuilt_first.raw_accuracy)
+    );
+    assert_eq!(rebuilt_second, before);
+    let missing: i64 = sql_one(
+        &path,
+        "SELECT count(*) FROM session_metrics WHERE recent_raw_accuracy IS NULL",
+    );
+    assert_eq!(missing, 0);
 }
 
 #[test]

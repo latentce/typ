@@ -307,6 +307,9 @@ speed you would have shown on standard material.
 
 It is reported against a recency-weighted average of your recent sessions
 (half-life five sessions): `+3 vs recent`. Watch this line, not gross WPM.
+The accuracy in `typ stats` uses the same average: its headline figure and
+its chart line are the recency-weighted accuracy, cached with each session
+as the speed figures are.
 
 ### Probes
 
@@ -367,4 +370,4 @@ override any of them with `--set name=value`; see
 | `long_word_length`, `length_penalty` | 10, 0.2 | penalty per character over the length |
 | `min_exposure_gap` | 2 | minimum spacing of same-target words |
 | `contamination_sessions` | 10 | how far back probe contamination looks |
-| `recent_half_life_sessions` | 5 | half-life of the "vs recent" average |
+| `recent_half_life_sessions` | 5 | half-life of the "vs recent" average, and of the recent accuracy `stats` shows |

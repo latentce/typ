@@ -72,16 +72,21 @@ pub fn final_accuracy(state: &SessionState) -> f64 {
     }
 }
 
-/// The user's recent level on each speed figure: an exponentially weighted
-/// average over completed sessions, so that one session's figure has
-/// something to be compared with that neither a single previous session
-/// nor a lifetime average would give. Also the figures of one session,
-/// when it is what a series is advanced by.
+/// The user's recent level on each session figure: an exponentially
+/// weighted average over completed sessions, so that one session's figure
+/// has something to be compared with that neither a single previous
+/// session nor a lifetime average would give. Also the figures of one
+/// session, when it is what a series is advanced by. Every figure is
+/// advanced once, from the series as of the previous completed session,
+/// so the level as of any session is fixed when that session ends.
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub struct RecentSeries {
     pub wpm: Option<f64>,
     pub adjusted_ratio: Option<f64>,
     pub reference_wpm: Option<f64>,
+    /// A share of target characters, as [`SessionSummary::raw_accuracy`]
+    /// is; `None` in a series from before accuracy joined it.
+    pub raw_accuracy: Option<f64>,
 }
 
 impl RecentSeries {
@@ -105,6 +110,7 @@ impl RecentSeries {
             wpm: advance(self.wpm, latest.wpm),
             adjusted_ratio: advance(self.adjusted_ratio, latest.adjusted_ratio),
             reference_wpm: advance(self.reference_wpm, latest.reference_wpm),
+            raw_accuracy: advance(self.raw_accuracy, latest.raw_accuracy),
         }
     }
 }
@@ -275,6 +281,7 @@ pub fn summarize(
         wpm: metrics.gross_wpm,
         adjusted_ratio,
         reference_wpm,
+        raw_accuracy: Some(metrics.raw_accuracy),
     };
     let performances = word_performances(&update.analysis, words);
     let probes = |contaminated: bool| {

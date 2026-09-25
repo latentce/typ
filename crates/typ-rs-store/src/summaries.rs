@@ -27,7 +27,8 @@ pub(crate) fn recent_before(
     let (started_at, id) = before.map_or((i64::MAX, i64::MAX), |(at, id)| (at, id.raw()));
     let recent = conn
         .prepare_cached(
-            "SELECT m.recent_wpm, m.recent_adjusted_ratio, m.recent_reference_wpm
+            "SELECT m.recent_wpm, m.recent_adjusted_ratio, m.recent_reference_wpm,
+                    m.recent_raw_accuracy
              FROM session_metrics m JOIN sessions s ON s.id = m.session_id
              WHERE m.profile_id = ?1
                AND (s.started_at < ?2 OR (s.started_at = ?2 AND s.id < ?3))
@@ -38,6 +39,7 @@ pub(crate) fn recent_before(
                 wpm: row.get(0)?,
                 adjusted_ratio: row.get(1)?,
                 reference_wpm: row.get(2)?,
+                raw_accuracy: row.get(3)?,
             })
         })
         .optional()?;
@@ -50,6 +52,7 @@ pub(crate) fn load(conn: &Connection, session: SessionId) -> Result<Option<Sessi
             "SELECT gross_wpm, raw_accuracy, final_accuracy, consistency, corrections,
                     session_offset, adjusted_ratio, reference_wpm,
                     recent_wpm, recent_adjusted_ratio, recent_reference_wpm,
+                    recent_raw_accuracy,
                     probe_words, probe_wpm, probe_raw_accuracy,
                     contaminated_probe_words, contaminated_probe_wpm,
                     contaminated_probe_raw_accuracy
@@ -69,13 +72,14 @@ pub(crate) fn load(conn: &Connection, session: SessionId) -> Result<Option<Sessi
                     wpm: row.get(8)?,
                     adjusted_ratio: row.get(9)?,
                     reference_wpm: row.get(10)?,
+                    raw_accuracy: row.get(11)?,
                 },
-                probe_words: row.get(11)?,
-                probe_wpm: row.get(12)?,
-                probe_raw_accuracy: row.get(13)?,
-                contaminated_probe_words: row.get(14)?,
-                contaminated_probe_wpm: row.get(15)?,
-                contaminated_probe_raw_accuracy: row.get(16)?,
+                probe_words: row.get(12)?,
+                probe_wpm: row.get(13)?,
+                probe_raw_accuracy: row.get(14)?,
+                contaminated_probe_words: row.get(15)?,
+                contaminated_probe_wpm: row.get(16)?,
+                contaminated_probe_raw_accuracy: row.get(17)?,
             })
         })
         .optional()?;
@@ -144,12 +148,12 @@ pub(crate) fn write(
         "INSERT OR REPLACE INTO session_metrics
              (session_id, profile_id, gross_wpm, raw_accuracy, final_accuracy, consistency,
               corrections, session_offset, adjusted_ratio, reference_wpm,
-              recent_wpm, recent_adjusted_ratio, recent_reference_wpm,
+              recent_wpm, recent_adjusted_ratio, recent_reference_wpm, recent_raw_accuracy,
               probe_words, probe_wpm, probe_raw_accuracy,
               contaminated_probe_words, contaminated_probe_wpm, contaminated_probe_raw_accuracy,
               model_version)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18,
-                 ?19, ?20)",
+                 ?19, ?20, ?21)",
     )?
     .execute(params![
         session.raw(),
@@ -165,6 +169,7 @@ pub(crate) fn write(
         summary.recent.wpm,
         summary.recent.adjusted_ratio,
         summary.recent.reference_wpm,
+        summary.recent.raw_accuracy,
         summary.probes.words as i64,
         summary.probes.wpm,
         summary.probes.raw_accuracy,

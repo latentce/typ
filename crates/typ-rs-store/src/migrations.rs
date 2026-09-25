@@ -15,6 +15,7 @@ const MIGRATIONS: &[&str] = &[
     include_str!("migrations/0004_context_model.sql"),
     include_str!("migrations/0005_training_events.sql"),
     include_str!("migrations/0006_session_metrics.sql"),
+    include_str!("migrations/0007_recent_raw_accuracy.sql"),
 ];
 
 pub(crate) fn run(conn: &mut Connection, now: i64) -> Result<()> {

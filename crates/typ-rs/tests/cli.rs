@@ -174,9 +174,16 @@ struct Chart<'a> {
 
 /// A trend chart as `stats` prints it to a pipe: `title` over the header,
 /// a box 32 columns wide holding thirteen rows of braille with a label on
-/// every third row, and a footer naming the first and last sessions across
-/// the box's 34 columns.
+/// every third row, a footer naming the first and last sessions across
+/// the box's 34 columns, and a line drawn somewhere in the body.
 fn assert_chart<'a>(chart: &'a str, title: &str, first: &str, last: &str) -> Chart<'a> {
+    let parsed = parse_chart(chart, title, first, last);
+    assert!(parsed.has_braille(), "{chart}");
+    parsed
+}
+
+/// As [`assert_chart`], without requiring a line in the body.
+fn parse_chart<'a>(chart: &'a str, title: &str, first: &str, last: &str) -> Chart<'a> {
     let lines: Vec<&str> = chart.lines().collect();
     let top = lines
         .iter()
@@ -202,12 +209,6 @@ fn assert_chart<'a>(chart: &'a str, title: &str, first: &str, last: &str) -> Cha
         );
     }
     assert!(
-        rows.iter()
-            .flat_map(|row| row.chars())
-            .any(|c| ('\u{2801}'..='\u{28ff}').contains(&c)),
-        "{chart}"
-    );
-    assert!(
         labels
             .iter()
             .enumerate()
@@ -224,6 +225,10 @@ fn assert_chart<'a>(chart: &'a str, title: &str, first: &str, last: &str) -> Cha
         labels,
         footer,
     }
+}
+
+fn is_braille(c: char) -> bool {
+    ('\u{2801}'..='\u{28ff}').contains(&c)
 }
 
 impl Chart<'_> {
@@ -248,14 +253,26 @@ impl Chart<'_> {
         columns
     }
 
+    /// Whether any row has a braille cell (not blank).
+    fn has_braille(&self) -> bool {
+        self.rows.iter().flat_map(|row| row.chars()).any(is_braille)
+    }
+
     /// Whether any row has a braille cell (not blank) at `column`.
     fn braille_at(&self, column: usize) -> bool {
-        self.rows.iter().any(|row| {
-            row.chars()
-                .nth(column)
-                .is_some_and(|c| ('\u{2801}'..='\u{28ff}').contains(&c))
-        })
+        self.rows
+            .iter()
+            .any(|row| row.chars().nth(column).is_some_and(is_braille))
     }
+}
+
+/// The last chart's block as `stats` prints it, split into the chart and
+/// the lines about the recent average that follow its footer.
+fn split_notes(block: &str) -> (&str, &str) {
+    let at = block
+        .find("\nrecent average:")
+        .unwrap_or_else(|| panic!("{block}"));
+    (&block[..at], &block[at + 1..])
 }
 
 #[test]
@@ -590,8 +607,9 @@ fn stats_with_one_session_shows_the_headline_without_changes_and_asks_for_one_mo
     );
     assert_eq!(lines.len(), 2 + 2 + 5 * 2 + 1, "{focus}");
     assert_eq!(blocks.next(), None);
-    // No chart: no line carries the legend.
-    assert!(!run.stdout.contains("⠒ trend"), "{}", run.stdout);
+    // No chart: no line carries the legend, and nothing explains the line.
+    assert!(!run.stdout.contains("⠒ recent average"), "{}", run.stdout);
+    assert!(!run.stdout.contains("recent average"), "{}", run.stdout);
 }
 
 #[test]
@@ -629,9 +647,10 @@ fn stats_with_rising_speed_shows_the_change_charts_the_trends_and_tables_the_ses
         .strip_prefix("▲ +")
         .unwrap_or_else(|| panic!("{speed}"));
     assert!(change.parse::<u32>().unwrap() > 0, "{speed}");
-    // The mean over the three sessions, the second analyzed on the spot;
-    // nothing to compare it with yet.
-    assert_eq!(headline[1], "94.4% accuracy");
+    // The recent accuracy cached with the latest session, advanced from
+    // 100% through the middle session's 83.3% before its summary was
+    // deleted, against the oldest session's 100%.
+    assert_eq!(headline[1], "98.1% accuracy  ▼ -1.9");
     assert_eq!(headline[2], "not enough probes yet to call a trend");
 
     // Both charts cover the same three sessions in a box 32 columns wide,
@@ -649,7 +668,7 @@ fn stats_with_rising_speed_shows_the_change_charts_the_trends_and_tables_the_ses
         speed.header,
         [
             "speed on standard text · 3 sessions   1 without a speed on standard text",
-            " • session  ⠒ trend",
+            " • session  ⠒ recent average",
         ]
     );
     let labels = speed.labels();
@@ -659,19 +678,31 @@ fn stats_with_rising_speed_shows_the_change_charts_the_trends_and_tables_the_ses
     assert_eq!(speed.markers(), [0, 31]);
     assert!(speed.braille_at(16), "{}", speed.rows.join("\n"));
 
+    // The line explaining the recent average follows the accuracy chart's
+    // footer, once, and nothing asks for a rebuild: the middle session has
+    // no summary at all, not a summary without the figure.
+    let (accuracy_chart, notes) = split_notes(blocks.next().unwrap());
+    assert_eq!(
+        notes,
+        "recent average: newer sessions count more, a session 5 back half as much"
+    );
+    assert_eq!(run.stdout.matches("recent average:").count(), 1);
+    assert!(!run.stdout.contains("rebuild"), "{}", run.stdout);
     let accuracy = assert_chart(
-        blocks.next().unwrap(),
+        accuracy_chart,
         "accuracy · 3 sessions",
         "#1 · 2024-01-15",
         "#4 · 2024-01-17",
     );
     assert_eq!(
         accuracy.header,
-        ["accuracy · 3 sessions   • session  ⠒ trend"]
+        ["accuracy · 3 sessions   • session  ⠒ recent average"]
     );
-    // The sessions' accuracies are 100%, 83.3%, and 100%.
+    // The sessions' accuracies are 100%, 83.3%, and 100%; the middle one
+    // has a point but no line value, so the line bridges its column.
     assert_eq!(accuracy.labels(), [100, 95, 90, 85, 80]);
     assert_eq!(accuracy.markers(), [0, 16, 31]);
+    assert!(accuracy.braille_at(16), "{}", accuracy.rows.join("\n"));
     assert_eq!(speed.footer, accuracy.footer);
     assert!(!run.stdout.contains('\x1b'), "{}", run.stdout);
 
@@ -707,6 +738,66 @@ fn stats_with_rising_speed_shows_the_change_charts_the_trends_and_tables_the_ses
     assert!(!run.stdout.contains("│ 3 ┆"), "{}", run.stdout);
     assert!(!run.stdout.contains("complete 1 more"), "{}", run.stdout);
     assert!(blocks.next().unwrap().starts_with("focus\n"));
+}
+
+#[test]
+fn stats_asks_for_a_rebuild_while_summaries_lack_the_recent_accuracy_and_rebuild_fills_it() {
+    let dir = tempfile::tempdir().unwrap();
+    {
+        let mut store = Store::open(&dir.path().join("typ.db")).unwrap();
+        store_session_at_pace(&mut store, 1_705_314_600, "cat dog", "cat dog", 100_000);
+        store_session_at_pace(&mut store, 1_705_392_000, "cat dog", "cat dg ", 80_000);
+        store_session_at_pace(&mut store, 1_705_478_400, "cat dog", "cat dog", 60_000);
+    }
+    // Summaries written before accuracy joined the recent series.
+    rusqlite::Connection::open(dir.path().join("typ.db"))
+        .unwrap()
+        .execute_batch("UPDATE session_metrics SET recent_raw_accuracy = NULL")
+        .unwrap();
+
+    let run = typ_in(dir.path(), &["stats"]);
+    assert!(run.ok, "{}", run.stderr);
+    let mut blocks = run.stdout.split("\n\n");
+    let headline: Vec<&str> = blocks.next().unwrap().lines().collect();
+    assert!(
+        headline[0].contains(" wpm on standard text  ▲ +"),
+        "{}",
+        headline[0]
+    );
+    assert_eq!(headline[1], "-- accuracy");
+    // The speed chart is as it would be; the accuracy chart has every
+    // session's point and no line at all.
+    assert_chart(
+        blocks.next().unwrap(),
+        "speed on standard text · 3 sessions",
+        "#1 · 2024-01-15",
+        "#3 · 2024-01-17",
+    );
+    let (accuracy_chart, notes) = split_notes(blocks.next().unwrap());
+    let accuracy = parse_chart(
+        accuracy_chart,
+        "accuracy · 3 sessions",
+        "#1 · 2024-01-15",
+        "#3 · 2024-01-17",
+    );
+    assert_eq!(accuracy.markers(), [0, 16, 31]);
+    assert!(!accuracy.has_braille(), "{}", accuracy.rows.join("\n"));
+    assert_eq!(
+        notes,
+        "recent average: newer sessions count more, a session 5 back half as much\n\
+         older sessions have no recent average yet: run typ rebuild to fill it in"
+    );
+
+    let run = typ_in(dir.path(), &["rebuild"]);
+    assert!(run.ok, "{}", run.stderr);
+    assert_eq!(run.stdout, "rebuilt the statistics from 3 sessions\n");
+
+    let run = typ_in(dir.path(), &["stats"]);
+    assert!(run.ok, "{}", run.stderr);
+    let lines: Vec<&str> = run.stdout.lines().collect();
+    assert_eq!(lines[1], "98.1% accuracy  ▼ -1.9");
+    assert!(!run.stdout.contains("rebuild"), "{}", run.stdout);
+    assert_eq!(run.stdout.matches("recent average:").count(), 1);
 }
 
 #[test]
@@ -825,17 +916,28 @@ fn replay_diff_compares_the_current_pipeline_with_the_stored_summary() {
     assert!(run.ok, "{}", run.stderr);
     assert_eq!(run.stdout, "no summary: the session was interrupted\n");
 
-    // A stored figure that the pipeline no longer produces shows up.
+    // A stored figure that the pipeline no longer produces shows up, the
+    // recent accuracy among the figures compared.
     rusqlite::Connection::open(dir.path().join("typ.db"))
         .unwrap()
-        .execute_batch("UPDATE session_metrics SET gross_wpm = 99 WHERE session_id = 2")
+        .execute_batch(
+            "UPDATE session_metrics SET gross_wpm = 99, recent_raw_accuracy = 0.5
+             WHERE session_id = 2",
+        )
         .unwrap();
     let run = typ_in(dir.path(), &["replay", "2", "--diff"]);
     assert!(run.ok, "{}", run.stderr);
+    // The second session's 100% advanced from the first's 83.3% by the
+    // half-life's share of the gap.
+    let alpha = 1.0 - 0.5f64.powf(0.2);
+    let recent_accuracy = 5.0 / 6.0 + alpha * (1.0 - 5.0 / 6.0);
     assert_eq!(
         run.stdout,
-        "differences from the stored summary\n\
-         \x20 gross_wpm                        stored    99.0000  current   140.0000\n"
+        format!(
+            "differences from the stored summary\n\
+             \x20 gross_wpm                        stored    99.0000  current   140.0000\n\
+             \x20 recent_raw_accuracy              stored     0.5000  current     {recent_accuracy:.4}\n"
+        )
     );
 }
 

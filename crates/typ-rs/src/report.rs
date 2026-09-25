@@ -36,12 +36,9 @@ const PROBE_WINDOW: usize = 100;
 /// How many sessions the progress view tables.
 const TABLED_SESSIONS: usize = 10;
 
-/// How many sessions apart the two speeds the headline compares are.
-const SPEED_SPAN: usize = 10;
-
-/// How many sessions each of the two accuracies the headline compares
-/// averages over, and the accuracy chart's trend at each session.
-const ACCURACY_SPAN: usize = 5;
+/// How many sessions back from the most recent the headline's comparison
+/// session is, for both of its figures.
+const HEADLINE_SPAN: usize = 10;
 
 /// How many patterns the focus block names.
 const FOCUS_PATTERNS: usize = 5;
@@ -90,7 +87,12 @@ const ACCURACY_SPAN_MIN: f64 = 8.0;
 const ACCURACY_STEP: f64 = 4.0;
 
 /// The header's legend: what a marker and a braille cell each mean.
-const CHART_LEGEND: &str = "• session  ⠒ trend";
+const CHART_LEGEND: &str = "• session  ⠒ recent average";
+
+/// The line under the charts when a session shown has a summary from
+/// before accuracy joined the recent series.
+const REBUILD_NOTE: &str =
+    "older sessions have no recent average yet: run typ rebuild to fill it in";
 
 /// What separates a header's title from an annotation on the same line.
 const ANNOTATION_GAP: &str = "   ";
@@ -273,8 +275,15 @@ struct ListedSession<'a> {
     /// The recent-series speed on standard text with the session included.
     recent_reference: Option<f64>,
     raw_accuracy: f64,
+    /// The recent-series raw accuracy with the session included; `None`
+    /// without a summary, and for a summary cached before accuracy joined
+    /// the series.
+    recent_accuracy: Option<f64>,
     final_accuracy: f64,
     consistency: Option<f64>,
+    /// Whether the figures come from a cached summary rather than an
+    /// analysis on the spot.
+    summarized: bool,
 }
 
 impl<'a> ListedSession<'a> {
@@ -297,8 +306,10 @@ impl<'a> ListedSession<'a> {
                 reference: s.reference_wpm,
                 recent_reference: s.recent.reference_wpm,
                 raw_accuracy: s.raw_accuracy,
+                recent_accuracy: s.recent.raw_accuracy,
                 final_accuracy: s.final_accuracy,
                 consistency: s.consistency,
+                summarized: true,
             },
             None => {
                 let m = metrics();
@@ -310,8 +321,10 @@ impl<'a> ListedSession<'a> {
                     reference: None,
                     recent_reference: None,
                     raw_accuracy: m.raw_accuracy,
+                    recent_accuracy: None,
                     final_accuracy: m.final_accuracy,
                     consistency: m.consistency,
+                    summarized: false,
                 }
             }
         }
@@ -635,11 +648,12 @@ pub struct Progress<'a> {
 
 /// The user's progress: a headline saying how speed on standard text and
 /// accuracy have moved, a chart of each over the recent sessions (the
-/// speed chart only once two sessions have a speed on standard text), a
-/// table of the most recent sessions, and the patterns the trainer is
-/// focusing on. `no completed sessions yet` and nothing else before the
-/// first completed session; after one, a line saying how many more the
-/// trend charts need in place of the charts.
+/// speed chart only once two sessions have a speed on standard text) with
+/// a line under them saying what the recent average is, a table of the
+/// most recent sessions, and the patterns the trainer is focusing on. `no
+/// completed sessions yet` and nothing else before the first completed
+/// session; after one, a line saying how many more the trend charts need
+/// in place of the charts.
 pub fn progress(view: &Progress, rendering: Rendering) -> String {
     if view.sessions.is_empty() {
         return "no completed sessions yet\n".to_string();
@@ -666,6 +680,11 @@ pub fn progress(view: &Progress, rendering: Rendering) -> String {
             out.push('\n');
             out.push_str(&chart);
         }
+        out.push_str(&trend_notes(
+            &figures,
+            view.config.recent_half_life_sessions,
+            rendering.width,
+        ));
     }
     out.push('\n');
     out.push_str(&session_table(
@@ -686,33 +705,37 @@ pub fn progress(view: &Progress, rendering: Rendering) -> String {
     out
 }
 
-/// Three lines over the sessions given, most recent first. The
-/// recent-series speed on standard text, with its change since the
-/// session ten back, or the oldest when there are fewer; both are taken
-/// among the sessions that have a cached recent series, so a session
-/// stored without a summary is passed over rather than shown as `--`.
-/// The mean raw accuracy of the last five sessions, with its change
-/// against the mean of the sessions before them, up to five, when there
-/// are any. The probe trend: the sustained marker, or why there is none.
+/// Three lines over the sessions given, most recent first. The recent
+/// speed on standard text and the recent accuracy, each the level cached
+/// with the most recent session that has one (`--` when none does), each
+/// with its change against one comparison session shared by both: the
+/// session ten back, or the oldest given when there are fewer. A change is
+/// shown only when the comparison session has that figure and the level
+/// came from a newer session; there is no falling back to a nearer
+/// session, so the two lines are compared against the same session or not
+/// at all. The probe trend: the sustained marker, or why there is none.
 fn headline(figures: &[ListedSession], trend: &ProbeTrend, color: bool) -> String {
-    let recent: Vec<f64> = figures.iter().filter_map(|f| f.recent_reference).collect();
-    let mut out = match recent.first() {
+    let comparison = HEADLINE_SPAN.min(figures.len() - 1);
+
+    let mut out = match headline_figure(figures, comparison, |f| f.recent_reference) {
         None => "-- wpm on standard text".to_string(),
-        Some(current) => {
-            let mut line = format!("{current:.0} wpm on standard text");
-            if recent.len() > 1 {
-                let earlier = recent[SPEED_SPAN.min(recent.len() - 1)];
-                let _ = write!(line, "  {}", delta(current - earlier, 0, color));
+        Some(speed) => {
+            let mut line = format!("{:.0} wpm on standard text", speed.level);
+            if let Some(change) = speed.change {
+                let _ = write!(line, "  {}", delta(change, 0, color));
             }
             line
         }
     };
 
-    let latest = mean_accuracy(&figures[..figures.len().min(ACCURACY_SPAN)]);
-    let _ = write!(out, "\n{latest:.1}% accuracy");
-    if figures.len() > ACCURACY_SPAN {
-        let before = &figures[ACCURACY_SPAN..figures.len().min(2 * ACCURACY_SPAN)];
-        let _ = write!(out, "  {}", delta(latest - mean_accuracy(before), 1, color));
+    match headline_figure(figures, comparison, |f| f.recent_accuracy) {
+        None => out.push_str("\n-- accuracy"),
+        Some(accuracy) => {
+            let _ = write!(out, "\n{:.1}% accuracy", 100.0 * accuracy.level);
+            if let Some(change) = accuracy.change {
+                let _ = write!(out, "  {}", delta(100.0 * change, 1, color));
+            }
+        }
     }
 
     let probes = match sustained_marker(trend) {
@@ -722,6 +745,33 @@ fn headline(figures: &[ListedSession], trend: &ProbeTrend, color: bool) -> Strin
     };
     let _ = write!(out, "\n{probes}\n");
     out
+}
+
+/// One figure of the headline: its level and, when there is a session to
+/// compare it with, how far it has moved since.
+struct Headlined {
+    level: f64,
+    change: Option<f64>,
+}
+
+/// One headline figure over the sessions, most recent first: the level of
+/// the most recent session that has it, and its change against the session
+/// at `comparison` when that session has the figure and is older than the
+/// one the level came from. `None` when no session has the figure.
+fn headline_figure(
+    figures: &[ListedSession],
+    comparison: usize,
+    figure: impl Fn(&ListedSession) -> Option<f64>,
+) -> Option<Headlined> {
+    let (at, level) = figures
+        .iter()
+        .enumerate()
+        .find_map(|(i, f)| figure(f).map(|level| (i, level)))?;
+    let change = (at < comparison)
+        .then(|| figure(&figures[comparison]))
+        .flatten()
+        .map(|earlier| level - earlier);
+    Some(Headlined { level, change })
 }
 
 /// A change as an arrow and the signed difference to `decimals` places:
@@ -758,7 +808,7 @@ struct Plotted {
 
 /// One session as the trend charts draw it: how the footer names it, its
 /// speed on standard text with the recent series at it, and its raw
-/// accuracy with the five-session mean at it.
+/// accuracy with the recent series at it.
 struct Charted<'a> {
     id: SessionId,
     /// The local start date, `YYYY-MM-DD`.
@@ -767,16 +817,17 @@ struct Charted<'a> {
     accuracy: Plotted,
 }
 
-/// The sessions as the charts draw them, most recent first. A session
+/// The sessions as the charts draw them, most recent first. Both trends
+/// are the recent series cached with each session, so that a session's
+/// line value is the one the headline showed when it was the latest and
+/// does not depend on which sessions happen to be loaded. A session
 /// without a speed on standard text has neither a speed point nor a trend
-/// there; every session has an accuracy, and the mean at it is taken over
-/// every session given, so cutting a window later does not change it.
+/// there; every session has an accuracy point, and a trend there only when
+/// its summary carries the recent accuracy.
 fn charted<'a>(figures: &[ListedSession<'a>]) -> Vec<Charted<'a>> {
-    let count = figures.len();
     figures
         .iter()
-        .enumerate()
-        .map(|(newest, f)| Charted {
+        .map(|f| Charted {
             id: f.id,
             date: date(f.when),
             speed: Plotted {
@@ -785,17 +836,10 @@ fn charted<'a>(figures: &[ListedSession<'a>]) -> Vec<Charted<'a>> {
             },
             accuracy: Plotted {
                 point: Some(100.0 * f.raw_accuracy),
-                trend: Some(mean_accuracy(
-                    &figures[newest..(newest + ACCURACY_SPAN).min(count)],
-                )),
+                trend: f.recent_accuracy.map(|a| 100.0 * a),
             },
         })
         .collect()
-}
-
-/// The mean raw accuracy of the sessions, in percent.
-fn mean_accuracy(sessions: &[ListedSession]) -> f64 {
-    100.0 * sessions.iter().map(|f| f.raw_accuracy).sum::<f64>() / sessions.len() as f64
 }
 
 /// The date of a local start time, `YYYY-MM-DD HH:MM`.
@@ -823,8 +867,7 @@ impl<'a> Window<'a> {
     /// the first and last sessions with a space between.
     fn new(charted: &'a [Charted<'a>], width: u16) -> Self {
         debug_assert!(charted.len() >= CHARTED_SESSIONS);
-        let fitting = sessions_that_fit(width);
-        let sessions: Vec<&Charted> = charted[..charted.len().min(fitting)].iter().rev().collect();
+        let sessions: Vec<&Charted> = windowed(charted, width).iter().rev().collect();
         let label = |c: &Charted| format!("#{} · {}", c.id, c.date);
         let (first, last) = (label(sessions[0]), label(sessions[sessions.len() - 1]));
         let min_columns = MIN_CHART_COLUMNS.max(first.chars().count() + last.chars().count());
@@ -855,6 +898,12 @@ fn widest_body(width: u16) -> usize {
 /// widest body, and never fewer than the narrowest body has columns.
 fn sessions_that_fit(width: u16) -> usize {
     widest_body(width).max(MIN_CHART_COLUMNS)
+}
+
+/// The sessions, most recent first, that the charts at `width` show: the
+/// most recent that fit.
+fn windowed<T>(sessions: &[T], width: u16) -> &[T] {
+    &sessions[..sessions.len().min(sessions_that_fit(width))]
 }
 
 /// The body width for `sessions` sessions at `width`: six columns a session
@@ -902,6 +951,59 @@ fn charts(figures: &[ListedSession], rendering: Rendering) -> Vec<String> {
         None,
         rendering,
     ));
+    out
+}
+
+/// What follows the last chart: a line saying what the recent average is,
+/// so that a reader knows the line is the same thing in both charts and
+/// is the figure the headline shows; and, when a session the charts show
+/// has a summary cached before accuracy joined the recent series, a line
+/// saying a rebuild fills it in. A session with no summary at all is not
+/// counted: it is summarized the next time the store opens. Each line is
+/// wrapped on spaces at `width`.
+fn trend_notes(figures: &[ListedSession], half_life: f64, width: u16) -> String {
+    let mut out = wrapped(&recent_average_note(half_life), width);
+    let stale = windowed(figures, width)
+        .iter()
+        .any(|f| f.summarized && f.recent_accuracy.is_none());
+    if stale {
+        out.push_str(&wrapped(REBUILD_NOTE, width));
+    }
+    out
+}
+
+/// How the recent average weighs sessions, with the half-life as a plain
+/// number (`5`, `2.5`, `0.75`). A half-life that is not positive gives the
+/// latest session all the weight.
+fn recent_average_note(half_life: f64) -> String {
+    if half_life > 0.0 {
+        format!(
+            "recent average: newer sessions count more, a session {half_life} back half as much"
+        )
+    } else {
+        "recent average: only the latest session counts".to_string()
+    }
+}
+
+/// `text` as lines no wider than `width`, broken on spaces, each ended by
+/// a newline. A word wider than `width` takes a line of its own.
+fn wrapped(text: &str, width: u16) -> String {
+    let mut out = String::new();
+    let mut line = String::new();
+    for word in text.split(' ') {
+        let joined = line.chars().count() + 1 + word.chars().count();
+        if !line.is_empty() && joined > width as usize {
+            out.push_str(&line);
+            out.push('\n');
+            line.clear();
+        }
+        if !line.is_empty() {
+            line.push(' ');
+        }
+        line.push_str(word);
+    }
+    out.push_str(&line);
+    out.push('\n');
     out
 }
 
@@ -1396,6 +1498,7 @@ const SUMMARY_FIGURES: &[SummaryFigure] = &[
     ("recent_wpm", |s| s.recent.wpm),
     ("recent_adjusted_ratio", |s| s.recent.adjusted_ratio),
     ("recent_reference_wpm", |s| s.recent.reference_wpm),
+    ("recent_raw_accuracy", |s| s.recent.raw_accuracy),
     ("probe_words", |s| Some(s.probes.words as f64)),
     ("probe_wpm", |s| s.probes.wpm),
     ("probe_raw_accuracy", |s| s.probes.raw_accuracy),
@@ -1586,6 +1689,7 @@ mod tests {
             wpm: Some(90.0),
             adjusted_ratio: Some(1.0),
             reference_wpm: Some(110.0),
+            raw_accuracy: Some(0.95),
         };
         ending.previous = Some(&previous);
         assert_eq!(
@@ -1751,8 +1855,10 @@ mod tests {
             reference,
             recent_reference: reference,
             raw_accuracy: 1.0,
+            recent_accuracy: Some(1.0),
             final_accuracy: 1.0,
             consistency,
+            summarized: true,
         }
     }
 
@@ -1813,13 +1919,26 @@ mod tests {
         assert_eq!(delta(0.0, 0, true), "= 0");
     }
 
-    /// A session's figures for the headline: its recent-series speed on
-    /// standard text and its raw accuracy.
-    fn figures(recent_reference: Option<f64>, raw_accuracy: f64) -> ListedSession<'static> {
+    /// A session's figures for the headline: its recent speed on standard
+    /// text and its recent accuracy, either unknown.
+    fn figures(
+        recent_reference: Option<f64>,
+        recent_accuracy: Option<f64>,
+    ) -> ListedSession<'static> {
         ListedSession {
             recent_reference,
-            raw_accuracy,
+            recent_accuracy,
             ..listed(Some(120.0), Some(1.0))
+        }
+    }
+
+    /// A session stored without a summary: analyzed on the spot, so it has
+    /// an accuracy but no speed on standard text and no recent series.
+    fn unsummarized() -> ListedSession<'static> {
+        ListedSession {
+            recent_accuracy: None,
+            summarized: false,
+            ..listed(None, None)
         }
     }
 
@@ -1832,83 +1951,124 @@ mod tests {
         }
     }
 
+    fn headline_lines(figures: &[ListedSession]) -> (String, String) {
+        let out = headline(figures, &no_trend(), false);
+        let mut lines = out.lines();
+        let speed = lines.next().unwrap().to_string();
+        let accuracy = lines.next().unwrap().to_string();
+        (speed, accuracy)
+    }
+
     #[test]
     fn the_headline_shows_speed_and_accuracy_without_changes_for_one_session() {
         assert_eq!(
-            headline(&[figures(Some(118.4), 0.964)], &no_trend(), false),
+            headline(&[figures(Some(118.4), Some(0.964))], &no_trend(), false),
             "118 wpm on standard text\n\
              96.4% accuracy\n\
              not enough probes yet to call a trend\n"
         );
         assert_eq!(
-            headline(&[figures(None, 1.0)], &no_trend(), false)
-                .lines()
-                .next()
-                .unwrap(),
-            "-- wpm on standard text"
+            headline_lines(&[figures(None, None)]),
+            ("-- wpm on standard text".into(), "-- accuracy".into())
         );
     }
 
     #[test]
-    fn the_headline_compares_speed_with_the_oldest_session_until_there_are_eleven() {
-        // Most recent first: the speed is compared with the oldest session's
-        // recent series, skipping a session that has none.
+    fn the_headline_compares_both_figures_with_the_oldest_session_until_there_are_eleven() {
+        // Most recent first: three sessions whose recent accuracies were
+        // 100%, 97.84%, and 98.12% oldest first.
         let three = [
-            figures(Some(124.0), 1.0),
-            figures(None, 1.0),
-            figures(Some(118.0), 1.0),
+            figures(Some(124.0), Some(0.9812)),
+            figures(Some(121.0), Some(0.9784)),
+            figures(Some(118.0), Some(1.0)),
         ];
         assert_eq!(
-            headline(&three, &no_trend(), false).lines().next().unwrap(),
-            "124 wpm on standard text  ▲ +6"
+            headline_lines(&three),
+            (
+                "124 wpm on standard text  ▲ +6".into(),
+                "98.1% accuracy  ▼ -1.9".into()
+            )
         );
         // From eleven on, with the session ten back.
         let mut twelve: Vec<ListedSession> = (0..12)
-            .map(|i| figures(Some(100.0 + i as f64), 1.0))
+            .map(|i| figures(Some(100.0 + i as f64), Some(0.99 - 0.01 * i as f64)))
             .collect();
         assert_eq!(
-            headline(&twelve, &no_trend(), false)
-                .lines()
-                .next()
-                .unwrap(),
-            "100 wpm on standard text  ▼ -10"
+            headline_lines(&twelve),
+            (
+                "100 wpm on standard text  ▼ -10".into(),
+                "99.0% accuracy  ▲ +10.0".into()
+            )
         );
-        twelve[10].recent_reference = Some(100.0);
+        twelve[10] = figures(Some(100.0), Some(0.99));
         assert_eq!(
-            headline(&twelve, &no_trend(), false)
-                .lines()
-                .next()
-                .unwrap(),
-            "100 wpm on standard text  = 0"
+            headline_lines(&twelve),
+            (
+                "100 wpm on standard text  = 0".into(),
+                "99.0% accuracy  = 0.0".into()
+            )
         );
     }
 
     #[test]
-    fn the_headline_compares_the_accuracy_of_the_last_five_sessions_with_the_five_before() {
-        // Five sessions: nothing to compare with.
-        let five: Vec<ListedSession> = (0..5).map(|_| figures(Some(120.0), 0.95)).collect();
+    fn the_headline_omits_a_change_the_comparison_session_cannot_supply() {
+        // The comparison session has no summary: both levels, no changes.
+        let no_summary = [
+            figures(Some(124.0), Some(0.98)),
+            figures(Some(121.0), Some(0.97)),
+            unsummarized(),
+        ];
         assert_eq!(
-            headline(&five, &no_trend(), false).lines().nth(1).unwrap(),
-            "95.0% accuracy"
+            headline_lines(&no_summary),
+            ("124 wpm on standard text".into(), "98.0% accuracy".into())
         );
-        // Seven: the last five against the two before them.
-        let mut seven = five.clone();
-        seven.push(figures(Some(120.0), 0.90));
-        seven.push(figures(Some(120.0), 0.92));
+        // The comparison session's summary is from before accuracy joined
+        // the recent series: the speed change shows, the accuracy's not.
+        let stale = [
+            figures(Some(124.0), Some(0.98)),
+            figures(Some(121.0), Some(0.97)),
+            figures(Some(118.0), None),
+        ];
         assert_eq!(
-            headline(&seven, &no_trend(), false).lines().nth(1).unwrap(),
-            "95.0% accuracy  ▲ +4.0"
+            headline_lines(&stale),
+            (
+                "124 wpm on standard text  ▲ +6".into(),
+                "98.0% accuracy".into()
+            )
         );
-        // Twelve: the sessions beyond the tenth are not compared.
-        let mut twelve = seven.clone();
-        twelve.extend((0..3).map(|_| figures(Some(120.0), 0.99)));
-        twelve.extend((0..2).map(|_| figures(Some(120.0), 0.10)));
+    }
+
+    #[test]
+    fn the_headline_takes_each_level_from_the_most_recent_session_that_has_it() {
+        // No session has a recent accuracy.
+        let none = [figures(Some(124.0), None), figures(Some(118.0), None)];
         assert_eq!(
-            headline(&twelve, &no_trend(), false)
-                .lines()
-                .nth(1)
-                .unwrap(),
-            "95.0% accuracy  ▼ -0.8"
+            headline_lines(&none),
+            (
+                "124 wpm on standard text  ▲ +6".into(),
+                "-- accuracy".into()
+            )
+        );
+        // The most recent session has no summary yet: the levels come from
+        // the one before, and are still compared with the oldest.
+        let pending = [
+            unsummarized(),
+            figures(Some(121.0), Some(0.97)),
+            figures(Some(118.0), Some(1.0)),
+        ];
+        assert_eq!(
+            headline_lines(&pending),
+            (
+                "121 wpm on standard text  ▲ +3".into(),
+                "97.0% accuracy  ▼ -3.0".into()
+            )
+        );
+        // With two, the level comes from the comparison session itself, so
+        // there is nothing to compare: no `= 0`.
+        let two = [unsummarized(), figures(Some(118.0), Some(1.0))];
+        assert_eq!(
+            headline_lines(&two),
+            ("118 wpm on standard text".into(), "100.0% accuracy".into())
         );
     }
 
@@ -1929,7 +2089,7 @@ mod tests {
             previous: Some(previous),
             sustained: Some(Sustained::Improvement),
         };
-        let one = [figures(Some(120.0), 1.0)];
+        let one = [figures(Some(120.0), Some(1.0))];
         assert_eq!(
             headline(&one, &improving, false).lines().nth(2).unwrap(),
             "sustained improvement from 60 wpm"
@@ -2097,7 +2257,7 @@ mod tests {
 
     /// A session's figures for the charts: its id, when it started, its
     /// speed on standard text and the recent series with it, and its raw
-    /// accuracy.
+    /// accuracy, which also stands as its recent accuracy.
     fn charted_session<'a>(
         id: &str,
         when: &'a str,
@@ -2111,7 +2271,19 @@ mod tests {
             reference,
             recent_reference,
             raw_accuracy,
+            recent_accuracy: Some(raw_accuracy),
             ..listed(None, None)
+        }
+    }
+
+    /// A session stored without a summary, as the charts see it: an
+    /// accuracy analyzed on the spot and nothing else.
+    fn unsummarized_session<'a>(id: &str, when: &'a str, raw_accuracy: f64) -> ListedSession<'a> {
+        ListedSession {
+            id: id.parse().unwrap(),
+            when,
+            raw_accuracy,
+            ..unsummarized()
         }
     }
 
@@ -2260,7 +2432,7 @@ mod tests {
         let parsed = parse(chart);
         assert_eq!(
             parsed.header,
-            ["speed on standard text · 2 sessions   • session  ⠒ trend"]
+            ["speed on standard text · 2 sessions   • session  ⠒ recent average"]
         );
         assert_eq!(parsed.top, format!("┌{}┐", "─".repeat(32)), "{chart}");
         assert_eq!(parsed.bottom, format!("└{}┘", "─".repeat(32)), "{chart}");
@@ -2288,10 +2460,13 @@ mod tests {
         let narrow = charts(&figures, plain(44));
         let (wide, narrow) = (parse(&wide[0]), parse(&narrow[0]));
         assert_eq!(wide.header.len(), 1);
-        assert_eq!(wide.header[0].chars().count(), 56);
+        assert_eq!(wide.header[0].chars().count(), 65);
         assert_eq!(
             narrow.header,
-            ["speed on standard text · 2 sessions", " • session  ⠒ trend"]
+            [
+                "speed on standard text · 2 sessions",
+                " • session  ⠒ recent average"
+            ]
         );
         assert_eq!(wide.rows, narrow.rows);
         assert_eq!(wide.labels, narrow.labels);
@@ -2300,7 +2475,7 @@ mod tests {
 
         let with_gap = [
             charted_session("4", "2024-01-17 08:00", Some(128.0), Some(124.0), 1.0),
-            charted_session("2", "2024-01-16 10:30", None, None, 1.0),
+            unsummarized_session("2", "2024-01-16 10:30", 1.0),
             charted_session("1", "2024-01-15 10:30", Some(103.0), Some(103.0), 1.0),
         ];
         let wide = charts(&with_gap, plain(80));
@@ -2308,7 +2483,7 @@ mod tests {
             parse(&wide[0]).header,
             [
                 "speed on standard text · 3 sessions   1 without a speed on standard text",
-                " • session  ⠒ trend"
+                " • session  ⠒ recent average"
             ]
         );
         assert_eq!(parse(&wide[0]).header[0].chars().count(), 72);
@@ -2318,7 +2493,7 @@ mod tests {
             [
                 "speed on standard text · 3 sessions",
                 " 1 without a speed on standard text",
-                " • session  ⠒ trend"
+                " • session  ⠒ recent average"
             ]
         );
     }
@@ -2327,7 +2502,7 @@ mod tests {
     fn both_charts_share_one_session_axis_and_the_speed_line_bridges_a_missing_session() {
         let figures = [
             charted_session("4", "2024-01-17 08:00", Some(128.0), Some(124.0), 1.0),
-            charted_session("2", "2024-01-16 10:30", None, None, 0.833),
+            unsummarized_session("2", "2024-01-16 10:30", 0.833),
             charted_session("1", "2024-01-15 10:30", Some(103.0), Some(103.0), 1.0),
         ];
         let charts = charts(&figures, plain(80));
@@ -2340,7 +2515,7 @@ mod tests {
         );
         assert_eq!(
             accuracy.header,
-            ["accuracy · 3 sessions   • session  ⠒ trend"]
+            ["accuracy · 3 sessions   • session  ⠒ recent average"]
         );
         assert_eq!(speed.top, accuracy.top);
         assert_eq!(speed.top.chars().count(), 34);
@@ -2365,8 +2540,8 @@ mod tests {
     fn the_speed_chart_is_left_out_with_one_speed_but_the_accuracy_chart_stays() {
         let figures = [
             charted_session("4", "2024-01-17 08:00", Some(128.0), Some(124.0), 1.0),
-            charted_session("2", "2024-01-16 10:30", None, None, 0.833),
-            charted_session("1", "2024-01-15 10:30", None, None, 1.0),
+            unsummarized_session("2", "2024-01-16 10:30", 0.833),
+            unsummarized_session("1", "2024-01-15 10:30", 1.0),
         ];
         let charts = charts(&figures, plain(80));
         assert_eq!(charts.len(), 1, "{charts:?}");
@@ -2375,6 +2550,161 @@ mod tests {
             "{}",
             charts[0]
         );
+    }
+
+    #[test]
+    fn the_accuracy_line_is_the_recent_accuracy_cached_with_each_session() {
+        // Most recent first, as the view holds them: the recent accuracies
+        // are what the line is drawn through, not a mean of the points, and
+        // the last of them is the figure the headline shows.
+        let figures = [
+            ListedSession {
+                recent_accuracy: Some(0.9812),
+                ..charted_session("4", "2024-01-17 08:00", Some(128.0), Some(124.0), 1.0)
+            },
+            ListedSession {
+                recent_accuracy: Some(0.9784),
+                ..charted_session("2", "2024-01-16 10:30", Some(110.0), Some(108.0), 0.833)
+            },
+            charted_session("1", "2024-01-15 10:30", Some(103.0), Some(103.0), 1.0),
+        ];
+        let plotted: Vec<(Option<f64>, Option<f64>)> = charted(&figures)
+            .iter()
+            .map(|c| {
+                let rounded = |v: Option<f64>| v.map(|v| (v * 100.0).round() / 100.0);
+                (rounded(c.accuracy.point), rounded(c.accuracy.trend))
+            })
+            .collect();
+        assert_eq!(
+            plotted,
+            [
+                (Some(100.0), Some(98.12)),
+                (Some(83.3), Some(97.84)),
+                (Some(100.0), Some(100.0)),
+            ]
+        );
+        let (_, accuracy) = headline_lines(&figures);
+        assert!(accuracy.starts_with("98.1% accuracy"), "{accuracy}");
+
+        // A session without a recent accuracy keeps its point and has no
+        // line value; the speed series has neither.
+        let mut with_gap = figures.clone();
+        with_gap[1] = unsummarized_session("2", "2024-01-16 10:30", 0.833);
+        let gap = &charted(&with_gap)[1];
+        assert_eq!((gap.accuracy.point, gap.accuracy.trend), (Some(83.3), None));
+        assert_eq!((gap.speed.point, gap.speed.trend), (None, None));
+        // A summary from before accuracy joined the series is the same to
+        // the chart.
+        with_gap[1] = ListedSession {
+            recent_accuracy: None,
+            ..charted_session("2", "2024-01-16 10:30", Some(110.0), Some(108.0), 0.833)
+        };
+        let stale = &charted(&with_gap)[1];
+        assert_eq!(
+            (stale.accuracy.point, stale.accuracy.trend),
+            (Some(83.3), None)
+        );
+        assert_eq!(
+            (stale.speed.point, stale.speed.trend),
+            (Some(110.0), Some(108.0))
+        );
+    }
+
+    #[test]
+    fn the_notes_under_the_charts_say_how_the_recent_average_works() {
+        let figures = [
+            charted_session("4", "2024-01-17 08:00", Some(128.0), Some(124.0), 1.0),
+            charted_session("1", "2024-01-15 10:30", Some(103.0), Some(103.0), 1.0),
+        ];
+        assert_eq!(
+            trend_notes(&figures, 5.0, 80),
+            "recent average: newer sessions count more, a session 5 back half as much\n"
+        );
+        assert_eq!(
+            trend_notes(&figures, 2.5, 80),
+            "recent average: newer sessions count more, a session 2.5 back half as much\n"
+        );
+        assert_eq!(
+            trend_notes(&figures, 0.75, 80),
+            "recent average: newer sessions count more, a session 0.75 back half as much\n"
+        );
+        assert_eq!(
+            trend_notes(&figures, 0.0, 80),
+            "recent average: only the latest session counts\n"
+        );
+        // Wrapped on a space at the terminal width.
+        assert_eq!(
+            trend_notes(&figures, 5.0, 40),
+            "recent average: newer sessions count\n\
+             more, a session 5 back half as much\n"
+        );
+    }
+
+    #[test]
+    fn a_summary_without_a_recent_accuracy_asks_for_a_rebuild_but_a_missing_summary_does_not() {
+        let stale = [
+            charted_session("4", "2024-01-17 08:00", Some(128.0), Some(124.0), 1.0),
+            ListedSession {
+                recent_accuracy: None,
+                ..charted_session("2", "2024-01-16 10:30", Some(110.0), Some(108.0), 0.833)
+            },
+            charted_session("1", "2024-01-15 10:30", Some(103.0), Some(103.0), 1.0),
+        ];
+        assert_eq!(
+            trend_notes(&stale, 5.0, 80),
+            "recent average: newer sessions count more, a session 5 back half as much\n\
+             older sessions have no recent average yet: run typ rebuild to fill it in\n"
+        );
+        assert_eq!(
+            trend_notes(&stale, 5.0, 40),
+            "recent average: newer sessions count\n\
+             more, a session 5 back half as much\n\
+             older sessions have no recent average\n\
+             yet: run typ rebuild to fill it in\n"
+        );
+        // The charts still draw: every session has its point and the line
+        // runs through the two that have a value.
+        let charts = charts(&stale, plain(80));
+        let accuracy = parse(&charts[1]);
+        assert_eq!(
+            accuracy.header,
+            ["accuracy · 3 sessions   • session  ⠒ recent average"]
+        );
+        assert_eq!(markers(&accuracy.rows), [0, 16, 31], "{}", charts[1]);
+        assert!(has_braille(&accuracy.rows), "{}", charts[1]);
+
+        let mut pending = stale.clone();
+        pending[1] = unsummarized_session("2", "2024-01-16 10:30", 0.833);
+        assert_eq!(
+            trend_notes(&pending, 5.0, 80),
+            "recent average: newer sessions count more, a session 5 back half as much\n"
+        );
+        // A stale session outside the window does not count.
+        let (ids, dates) = ids_and_dates(80);
+        let mut many = steady(&ids, &dates);
+        many[79].recent_accuracy = None;
+        assert!(!trend_notes(&many, 5.0, 80).contains("rebuild"));
+        many[0].recent_accuracy = None;
+        assert!(trend_notes(&many, 5.0, 80).contains("rebuild"));
+    }
+
+    #[test]
+    fn the_accuracy_chart_draws_no_line_until_two_sessions_have_a_recent_accuracy() {
+        let (ids, dates) = ids_and_dates(3);
+        let mut figures = steady(&ids, &dates);
+        for f in &mut figures {
+            f.recent_accuracy = None;
+        }
+        let none = charts(&figures, plain(80));
+        let accuracy = parse(&none[1]);
+        assert_eq!(markers(&accuracy.rows), [0, 16, 31], "{}", none[1]);
+        assert!(!has_braille(&accuracy.rows), "{}", none[1]);
+        figures[0].recent_accuracy = Some(1.0);
+        let one = charts(&figures, plain(80));
+        assert!(!has_braille(&parse(&one[1]).rows), "{}", one[1]);
+        figures[2].recent_accuracy = Some(0.95);
+        let two = charts(&figures, plain(80));
+        assert!(has_braille(&parse(&two[1]).rows), "{}", two[1]);
     }
 
     #[test]
