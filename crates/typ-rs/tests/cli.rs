@@ -161,37 +161,101 @@ fn target(pattern: &str, role: TargetRole) -> SelectedTarget {
 }
 
 /// How many rows of braille a trend chart's body has.
-const CHART_ROWS: usize = 8;
+const CHART_ROWS: usize = 13;
 
-/// A trend chart as `stats` prints it to a pipe: `title`, eight rows of
-/// braille cells, and a footer running from `first_date` to the last
-/// session's date across 80 columns.
-fn assert_chart(chart: &str, title: &str, first_date: &str) {
-    let rows: Vec<&str> = chart.lines().collect();
-    assert_eq!(rows[0], title, "{chart}");
-    assert_eq!(rows.len(), 1 + CHART_ROWS + 1, "{chart}");
+/// A trend chart taken apart: its header lines, the body rows between the
+/// two `│` with the whole-number label after each, and the footer.
+struct Chart<'a> {
+    header: Vec<&'a str>,
+    rows: Vec<&'a str>,
+    labels: Vec<Option<u32>>,
+    footer: &'a str,
+}
+
+/// A trend chart as `stats` prints it to a pipe: `title` over the header,
+/// a box 32 columns wide holding thirteen rows of braille with a label on
+/// every third row, and a footer naming the first and last sessions across
+/// the box's 34 columns.
+fn assert_chart<'a>(chart: &'a str, title: &str, first: &str, last: &str) -> Chart<'a> {
+    let lines: Vec<&str> = chart.lines().collect();
+    let top = lines
+        .iter()
+        .position(|l| l.starts_with('┌'))
+        .unwrap_or_else(|| panic!("{chart}"));
+    assert!(lines[0].starts_with(title), "{chart}");
+    assert_eq!(lines[top], format!("┌{}┐", "─".repeat(32)), "{chart}");
+    let bottom = top + 1 + CHART_ROWS;
+    assert_eq!(lines[bottom], format!("└{}┘", "─".repeat(32)), "{chart}");
+    assert_eq!(lines.len(), bottom + 2, "{chart}");
+    let mut rows = Vec::new();
+    let mut labels = Vec::new();
+    for line in &lines[top + 1..bottom] {
+        let (row, rest) = line
+            .strip_prefix('│')
+            .and_then(|l| l.split_once('│'))
+            .unwrap_or_else(|| panic!("{line:?}"));
+        assert_eq!(row.chars().count(), 32, "{line:?}");
+        rows.push(row);
+        labels.push(
+            rest.strip_prefix(' ')
+                .map(|l| l.parse().unwrap_or_else(|_| panic!("{line:?}"))),
+        );
+    }
     assert!(
-        rows[1..=CHART_ROWS]
-            .iter()
+        rows.iter()
             .flat_map(|row| row.chars())
             .any(|c| ('\u{2801}'..='\u{28ff}').contains(&c)),
         "{chart}"
     );
-    let footer = rows[CHART_ROWS + 1];
-    assert!(footer.starts_with(first_date), "{footer:?}");
-    assert!(footer.ends_with("2024-01-17"), "{footer:?}");
-    assert_eq!(footer.chars().count(), 80, "{footer:?}");
+    assert!(
+        labels
+            .iter()
+            .enumerate()
+            .all(|(r, l)| l.is_some() == (r % 3 == 0)),
+        "{chart}"
+    );
+    let footer = lines[bottom + 1];
+    assert!(footer.starts_with(&format!(" {first} ")), "{footer:?}");
+    assert!(footer.ends_with(last), "{footer:?}");
+    assert_eq!(footer.chars().count(), 34, "{footer:?}");
+    Chart {
+        header: lines[..top].to_vec(),
+        rows,
+        labels,
+        footer,
+    }
 }
 
-/// The whole-number y labels at the right of a chart's first and last rows.
-fn chart_labels(chart: &str) -> [u32; 2] {
-    let rows: Vec<&str> = chart.lines().collect();
-    let label = |row: &str| {
-        row.rsplit_once(' ')
-            .and_then(|(_, l)| l.parse().ok())
-            .unwrap_or_else(|| panic!("{row:?}"))
-    };
-    [label(rows[1]), label(rows[CHART_ROWS])]
+impl Chart<'_> {
+    /// The labels on rows 0, 3, 6, 9, and 12, top first.
+    fn labels(&self) -> Vec<u32> {
+        self.labels.iter().flatten().copied().collect()
+    }
+
+    /// The column of every `•` in the body, in column order.
+    fn markers(&self) -> Vec<usize> {
+        let mut columns: Vec<usize> = self
+            .rows
+            .iter()
+            .flat_map(|row| {
+                row.chars()
+                    .enumerate()
+                    .filter(|(_, c)| *c == '•')
+                    .map(|(i, _)| i)
+            })
+            .collect();
+        columns.sort_unstable();
+        columns
+    }
+
+    /// Whether any row has a braille cell (not blank) at `column`.
+    fn braille_at(&self, column: usize) -> bool {
+        self.rows.iter().any(|row| {
+            row.chars()
+                .nth(column)
+                .is_some_and(|c| ('\u{2801}'..='\u{28ff}').contains(&c))
+        })
+    }
 }
 
 #[test]
@@ -526,8 +590,8 @@ fn stats_with_one_session_shows_the_headline_without_changes_and_asks_for_one_mo
     );
     assert_eq!(lines.len(), 2 + 2 + 5 * 2 + 1, "{focus}");
     assert_eq!(blocks.next(), None);
-    // No chart title: none ends in ` sessions`.
-    assert!(!run.stdout.contains(" sessions\n"), "{}", run.stdout);
+    // No chart: no line carries the legend.
+    assert!(!run.stdout.contains("⠒ trend"), "{}", run.stdout);
 }
 
 #[test]
@@ -543,10 +607,12 @@ fn stats_with_rising_speed_shows_the_change_charts_the_trends_and_tables_the_ses
         store_session_at_pace(&mut store, 1_705_478_400, "cat dog", "cat dog", 60_000);
     }
     // A session applied to the model but not yet summarized has no speed
-    // on standard text, and its recent series is unknown.
+    // on standard text, and its recent series is unknown. It is the middle
+    // one, so the gap falls inside the charts and the oldest session, which
+    // the headline compares against, keeps its figures.
     rusqlite::Connection::open(dir.path().join("typ.db"))
         .unwrap()
-        .execute_batch("DELETE FROM session_metrics WHERE session_id = 1")
+        .execute_batch("DELETE FROM session_metrics WHERE session_id = 2")
         .unwrap();
 
     let run = typ_in(dir.path(), &["stats"]);
@@ -563,27 +629,50 @@ fn stats_with_rising_speed_shows_the_change_charts_the_trends_and_tables_the_ses
         .strip_prefix("▲ +")
         .unwrap_or_else(|| panic!("{speed}"));
     assert!(change.parse::<u32>().unwrap() > 0, "{speed}");
-    // The mean over the three sessions, the third analyzed on the spot;
+    // The mean over the three sessions, the second analyzed on the spot;
     // nothing to compare it with yet.
     assert_eq!(headline[1], "94.4% accuracy");
     assert_eq!(headline[2], "not enough probes yet to call a trend");
 
-    // The speed chart counts the two sessions with a speed on standard
-    // text; the accuracy chart every one. Each is a title, eight rows of
-    // braille labeled top and bottom, and the first and last dates across
-    // the 80 columns a pipe gets. Stdout is not a terminal, so no color.
-    let speed = blocks.next().unwrap();
-    let accuracy = blocks.next().unwrap();
-    assert_chart(speed, "speed on standard text · 2 sessions", "2024-01-16");
-    assert_chart(accuracy, "accuracy · 3 sessions", "2024-01-15");
-    let speed_labels = chart_labels(speed);
-    assert!(speed_labels.iter().all(|l| l % 10 == 0), "{speed}");
-    assert!(speed_labels[0] > speed_labels[1], "{speed}");
-    assert!(speed_labels[0] - speed_labels[1] >= 20, "{speed}");
-    let accuracy_labels = chart_labels(accuracy);
-    assert_eq!(accuracy_labels[0], 100, "{accuracy}");
-    assert!(accuracy_labels[1].is_multiple_of(5), "{accuracy}");
-    assert!(accuracy_labels[1] <= 80, "{accuracy}");
+    // Both charts cover the same three sessions in a box 32 columns wide,
+    // each session in the same column of both. The speed chart notes the
+    // session without a speed on standard text and leaves its column
+    // empty but for the trend line running across it. Stdout is not a
+    // terminal, so no color.
+    let speed = assert_chart(
+        blocks.next().unwrap(),
+        "speed on standard text · 3 sessions",
+        "#1 · 2024-01-15",
+        "#4 · 2024-01-17",
+    );
+    assert_eq!(
+        speed.header,
+        [
+            "speed on standard text · 3 sessions   1 without a speed on standard text",
+            " • session  ⠒ trend",
+        ]
+    );
+    let labels = speed.labels();
+    assert!(labels.iter().all(|l| l.is_multiple_of(5)), "{labels:?}");
+    assert!(labels.windows(2).all(|w| w[0] > w[1]), "{labels:?}");
+    assert!((labels[0] - labels[4]).is_multiple_of(20), "{labels:?}");
+    assert_eq!(speed.markers(), [0, 31]);
+    assert!(speed.braille_at(16), "{}", speed.rows.join("\n"));
+
+    let accuracy = assert_chart(
+        blocks.next().unwrap(),
+        "accuracy · 3 sessions",
+        "#1 · 2024-01-15",
+        "#4 · 2024-01-17",
+    );
+    assert_eq!(
+        accuracy.header,
+        ["accuracy · 3 sessions   • session  ⠒ trend"]
+    );
+    // The sessions' accuracies are 100%, 83.3%, and 100%.
+    assert_eq!(accuracy.labels(), [100, 95, 90, 85, 80]);
+    assert_eq!(accuracy.markers(), [0, 16, 31]);
+    assert_eq!(speed.footer, accuracy.footer);
     assert!(!run.stdout.contains('\x1b'), "{}", run.stdout);
 
     let table: Vec<&str> = blocks.next().unwrap().lines().collect();
@@ -606,19 +695,13 @@ fn stats_with_rising_speed_shows_the_change_charts_the_trends_and_tables_the_ses
         "{}",
         table[4]
     );
-    assert!(
-        table[6].starts_with("│ 2 ┆ 2024-01-16 08:00 ┆     2 ┆ 150 ┆ "),
-        "{}",
-        table[6]
-    );
-    assert!(
-        table[6].ends_with(" ┆    83.3% ┆        66.7% │"),
-        "{}",
-        table[6]
+    assert_eq!(
+        table[6],
+        "│ 2 ┆ 2024-01-16 08:00 ┆     2 ┆ 150 ┆            -- ┆    83.3% ┆        66.7% │"
     );
     assert_eq!(
         table[8],
-        "│ 1 ┆ 2024-01-15 10:30 ┆     2 ┆ 140 ┆            -- ┆   100.0% ┆       100.0% │"
+        "│ 1 ┆ 2024-01-15 10:30 ┆     2 ┆ 140 ┆           120 ┆   100.0% ┆       100.0% │"
     );
     assert_eq!(table.len(), 10, "{}", table.join("\n"));
     assert!(!run.stdout.contains("│ 3 ┆"), "{}", run.stdout);

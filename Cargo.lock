@@ -701,6 +701,7 @@ name = "typ-rs"
 version = "0.1.0"
 dependencies = [
  "clap",
+ "colored",
  "comfy-table",
  "crossterm",
  "dirs",

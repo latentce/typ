@@ -100,12 +100,16 @@ own history. To start from nothing, `rm -r target/typ-data` first.
 16. **Charts.** With two or more sessions completed, `just run stats` shows
     the headline with a change, then two charts between it and the table:
     `speed on standard text · N sessions` and `accuracy · N sessions`, each
-    eight rows of braille as wide as the terminal, with the sessions as
-    single dots and a green line drawn through them, whole-number labels at
-    the top and bottom right (`100` topping the accuracy chart), and the
-    dates of the first and last session at the two ends beneath. Widen or
-    narrow the terminal: the charts follow. `NO_COLOR=1 just run stats`
-    shows the same charts with the line uncolored, and the arrows plain.
+    a framed box of thirteen rows with the legend `• session  ⠒ trend` on
+    its title line, every session a `•` in the terminal's own color, a
+    green line drawn through them, five whole-number labels down the right
+    of the frame (`100` topping the accuracy chart), and a footer naming
+    the first and last sessions as `#id · date`. The two charts line up
+    session for session: each `•` in the speed chart has one in the same
+    column of the accuracy chart. Widen the terminal: the boxes stay the
+    same size; narrow it below the box's width and they shrink to fit.
+    `NO_COLOR=1 just run stats` shows the same charts with the line
+    uncolored, and the arrows plain.
 17. **Replay.** `just run replay N` with an id from the table. The first
     lines repeat the results the session printed; below them every word
     shows its first attempt, its own raw accuracy, and the errors attributed

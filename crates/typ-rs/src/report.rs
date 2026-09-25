@@ -50,16 +50,34 @@ const FOCUS_PATTERNS: usize = 5;
 /// says how many more to complete where they would go.
 const CHARTED_SESSIONS: usize = 2;
 
-/// How many text rows a trend chart's body takes.
-const CHART_ROWS: usize = 8;
+/// How many text rows a trend chart's body takes: twelve gaps, so that a
+/// label every three rows splits the axis into four equal intervals.
+const CHART_ROWS: usize = 13;
 
-/// The columns right of a chart's body for a space and a label of up to
+/// The body's height in braille dots, four to a row: the canvas draws its
+/// top row of dots as a row of its own, so the body has one row more than
+/// its height in dots suggests.
+const CHART_DOTS_HIGH: usize = 4 * (CHART_ROWS - 1);
+
+/// How many rows apart the axis labels sit.
+const LABEL_ROWS: usize = 3;
+
+/// The most columns a trend chart's body takes.
+const CHART_BOX_COLUMNS: usize = 72;
+
+/// How many columns a chart body grows per session until the box is full.
+const COLUMNS_PER_SESSION: usize = 6;
+
+/// The two `│` either side of a chart body.
+const CHART_FRAME: usize = 2;
+
+/// The columns right of a chart's frame for a space and a label of up to
 /// three digits.
 const Y_LABEL_MARGIN: usize = 4;
 
-/// The fewest columns a chart body is drawn in, whatever the width: the
-/// chart library draws nothing narrower.
-const MIN_CHART_COLUMNS: usize = 17;
+/// The fewest columns a chart body is drawn in, whatever the width or the
+/// number of sessions.
+const MIN_CHART_COLUMNS: usize = 32;
 
 /// The least a speed axis spans, in WPM, and the multiple its ends are
 /// rounded to.
@@ -67,9 +85,18 @@ const SPEED_SPAN_MIN: f64 = 20.0;
 const SPEED_STEP: f64 = 10.0;
 
 /// The least an accuracy axis spans, in percentage points, and the
-/// multiple its bottom is rounded to; its top is always 100.
-const ACCURACY_SPAN_MIN: f64 = 10.0;
-const ACCURACY_STEP: f64 = 5.0;
+/// multiple its span is rounded to; its top is always 100.
+const ACCURACY_SPAN_MIN: f64 = 8.0;
+const ACCURACY_STEP: f64 = 4.0;
+
+/// The header's legend: what a marker and a braille cell each mean.
+const CHART_LEGEND: &str = "• session  ⠒ trend";
+
+/// What separates a header's title from an annotation on the same line.
+const ANNOTATION_GAP: &str = "   ";
+
+/// What marks a session in a chart body.
+const SESSION_MARKER: char = '•';
 
 /// The trend line's color: a mid-brightness green that reads on dark and
 /// light backgrounds alike.
@@ -635,11 +662,7 @@ pub fn progress(view: &Progress, rendering: Rendering) -> String {
             plural(more, "session")
         );
     } else {
-        let charts = [
-            speed_chart(&figures, rendering),
-            accuracy_chart(&figures, rendering),
-        ];
-        for chart in charts.into_iter().flatten() {
+        for chart in charts(&figures, rendering) {
             out.push('\n');
             out.push_str(&chart);
         }
@@ -725,55 +748,49 @@ fn delta(change: f64, decimals: usize, color: bool) -> String {
     }
 }
 
-/// One session as a trend chart plots it: its local start date, its own
-/// figure, and the trend's figure at it.
-struct Plotted<'a> {
+/// One session's figures for a trend chart: its own figure and the trend's
+/// at it, either unknown.
+#[derive(Debug, Clone, Copy)]
+struct Plotted {
+    point: Option<f64>,
+    trend: Option<f64>,
+}
+
+/// One session as the trend charts draw it: how the footer names it, its
+/// speed on standard text with the recent series at it, and its raw
+/// accuracy with the five-session mean at it.
+struct Charted<'a> {
+    id: SessionId,
+    /// The local start date, `YYYY-MM-DD`.
     date: &'a str,
-    point: f64,
-    trend: f64,
+    speed: Plotted,
+    accuracy: Plotted,
 }
 
-/// The speed chart over the sessions given, most recent first: each
-/// session's speed on standard text as a point and its recent series as
-/// the line through them. A session without a speed on standard text is
-/// left out of both and of the count, rather than drawn at zero. `None`
-/// with fewer than two sessions to draw.
-fn speed_chart(figures: &[ListedSession], rendering: Rendering) -> Option<String> {
-    let plotted: Vec<Plotted> = figures
-        .iter()
-        .rev()
-        .filter_map(|f| {
-            Some(Plotted {
-                date: date(f.when),
-                point: f.reference?,
-                trend: f.recent_reference?,
-            })
-        })
-        .collect();
-    trend_chart("speed on standard text", &plotted, speed_range, rendering)
-}
-
-/// The accuracy chart over the sessions given, most recent first: each
-/// session's raw accuracy as a point and, as the line, the mean over the
-/// five sessions up to and including it. Every session has an accuracy,
-/// so every one is drawn. `None` with fewer than two sessions.
-fn accuracy_chart(figures: &[ListedSession], rendering: Rendering) -> Option<String> {
+/// The sessions as the charts draw them, most recent first. A session
+/// without a speed on standard text has neither a speed point nor a trend
+/// there; every session has an accuracy, and the mean at it is taken over
+/// every session given, so cutting a window later does not change it.
+fn charted<'a>(figures: &[ListedSession<'a>]) -> Vec<Charted<'a>> {
     let count = figures.len();
-    let plotted: Vec<Plotted> = figures
+    figures
         .iter()
-        .rev()
         .enumerate()
-        .map(|(i, f)| {
-            let newest = count - 1 - i;
-            let window = &figures[newest..(newest + ACCURACY_SPAN).min(count)];
-            Plotted {
-                date: date(f.when),
-                point: 100.0 * f.raw_accuracy,
-                trend: mean_accuracy(window),
-            }
+        .map(|(newest, f)| Charted {
+            id: f.id,
+            date: date(f.when),
+            speed: Plotted {
+                point: f.reference,
+                trend: f.recent_reference,
+            },
+            accuracy: Plotted {
+                point: Some(100.0 * f.raw_accuracy),
+                trend: Some(mean_accuracy(
+                    &figures[newest..(newest + ACCURACY_SPAN).min(count)],
+                )),
+            },
         })
-        .collect();
-    trend_chart("accuracy", &plotted, accuracy_range, rendering)
+        .collect()
 }
 
 /// The mean raw accuracy of the sessions, in percent.
@@ -786,78 +803,235 @@ fn date(when: &str) -> &str {
     when.split(' ').next().unwrap_or(when)
 }
 
-/// A titled, footed line chart of the sessions given, oldest first, as
-/// many of the most recent as fit the width: `subject · N sessions` over
-/// the body, each session's figure as a point and the trend as a line
-/// through the same positions, on the y axis `range` gives for the values
-/// drawn, then the first and last drawn sessions' dates at the two ends of
-/// the width. `None` with fewer than two sessions, since one point is not
-/// a trend.
-fn trend_chart(
-    subject: &str,
-    plotted: &[Plotted],
-    range: impl Fn(&[f64]) -> (f64, f64),
-    rendering: Rendering,
-) -> Option<String> {
-    let fitting = points_that_fit(rendering.width);
-    let plotted = &plotted[plotted.len().saturating_sub(fitting)..];
-    if plotted.len() < 2 {
-        return None;
-    }
-    let values: Vec<f64> = plotted.iter().flat_map(|p| [p.point, p.trend]).collect();
-    let (bottom, top) = range(&values);
-    let at = |get: fn(&Plotted) -> f64| -> Vec<(f32, f32)> {
-        plotted
-            .iter()
-            .enumerate()
-            .map(|(i, p)| (i as f32, get(p) as f32))
-            .collect()
-    };
-    let points = at(|p| p.point);
-    let line = at(|p| p.trend);
+/// The sessions both trend charts draw, oldest first, and the body width
+/// they share, so that a session has the same column in both and its speed
+/// and accuracy sit one above the other. Never fewer than two sessions.
+struct Window<'a> {
+    sessions: Vec<&'a Charted<'a>>,
+    /// The body's width in columns.
+    columns: usize,
+    /// How the footer names the first and last sessions, `#id · date`.
+    first: String,
+    last: String,
+}
 
-    let mut out = format!(
-        "{subject} · {} {}\n",
-        plotted.len(),
-        plural(plotted.len(), "session")
-    );
-    out.push_str(&braille_chart(&points, &line, bottom, top, rendering));
-    let (first, last) = (plotted[0].date, plotted[plotted.len() - 1].date);
-    let width = chart_columns(rendering.width) + Y_LABEL_MARGIN;
+impl<'a> Window<'a> {
+    /// The most recent of `charted` (most recent first) that fit `width`,
+    /// oldest first, in the body width that suits them: six columns a
+    /// session up to the box, no wider than the terminal leaves after the
+    /// frame and the labels, and never narrower than lets the footer name
+    /// the first and last sessions with a space between.
+    fn new(charted: &'a [Charted<'a>], width: u16) -> Self {
+        debug_assert!(charted.len() >= CHARTED_SESSIONS);
+        let fitting = sessions_that_fit(width);
+        let sessions: Vec<&Charted> = charted[..charted.len().min(fitting)].iter().rev().collect();
+        let label = |c: &Charted| format!("#{} · {}", c.id, c.date);
+        let (first, last) = (label(sessions[0]), label(sessions[sessions.len() - 1]));
+        let min_columns = MIN_CHART_COLUMNS.max(first.chars().count() + last.chars().count());
+        let columns = chart_columns(sessions.len(), width, min_columns);
+        Window {
+            sessions,
+            columns,
+            first,
+            last,
+        }
+    }
+
+    /// The body column of the session at `index`: the sessions spread
+    /// evenly from the first column to the last, rounded to the nearest.
+    fn column(&self, index: usize) -> usize {
+        let gaps = self.sessions.len() - 1;
+        (index * (self.columns - 1) + gaps / 2) / gaps
+    }
+}
+
+/// The most columns a chart body takes at `width`: the box, or what the
+/// terminal leaves after the frame and the labels when that is less.
+fn widest_body(width: u16) -> usize {
+    CHART_BOX_COLUMNS.min((width as usize).saturating_sub(CHART_FRAME + Y_LABEL_MARGIN))
+}
+
+/// How many sessions the charts at `width` hold: one per column of the
+/// widest body, and never fewer than the narrowest body has columns.
+fn sessions_that_fit(width: u16) -> usize {
+    widest_body(width).max(MIN_CHART_COLUMNS)
+}
+
+/// The body width for `sessions` sessions at `width`: six columns a session
+/// up to the widest body, and never below `min_columns`, even when the
+/// terminal is narrower than that; a chart that cannot hold its footer is
+/// not worth fitting, so it overruns instead.
+fn chart_columns(sessions: usize, width: u16, min_columns: usize) -> usize {
+    (sessions * COLUMNS_PER_SESSION)
+        .min(widest_body(width))
+        .max(min_columns)
+}
+
+/// The trend charts over the sessions given, most recent first: speed on
+/// standard text, then accuracy, over one window of the most recent
+/// sessions that fit, each session in the same column of both. A session
+/// without a speed on standard text is an empty column in the speed chart,
+/// which the trend runs straight across, and is counted in a note on that
+/// chart's header; the speed chart is left out altogether when fewer than
+/// two sessions have a speed, since one point is not a trend.
+fn charts(figures: &[ListedSession], rendering: Rendering) -> Vec<String> {
+    let drawn = charted(figures);
+    let window = Window::new(&drawn, rendering.width);
+    let speed: Vec<Plotted> = window.sessions.iter().map(|c| c.speed).collect();
+    let accuracy: Vec<Plotted> = window.sessions.iter().map(|c| c.accuracy).collect();
+
+    let mut out = Vec::new();
+    let with_speed = speed.iter().filter(|p| p.point.is_some()).count();
+    if with_speed >= CHARTED_SESSIONS {
+        let without = window.sessions.len() - with_speed;
+        let note = (without > 0).then(|| format!("{without} without a speed on standard text"));
+        out.push(framed_chart(
+            &window,
+            "speed on standard text",
+            &speed,
+            speed_range,
+            note,
+            rendering,
+        ));
+    }
+    out.push(framed_chart(
+        &window,
+        "accuracy",
+        &accuracy,
+        accuracy_range,
+        None,
+        rendering,
+    ));
+    out
+}
+
+/// A framed trend chart of `series`, one entry per session of the window:
+/// a header of `subject · N sessions`, the note if any, and the legend; the
+/// body in a box, each session's figure a marker and the trend a braille
+/// line through the sessions that have one; a whole-number label right of
+/// the frame every three rows, on the axis `range` gives for the values
+/// drawn; and a footer naming the first and last sessions as `#id · date`.
+fn framed_chart(
+    window: &Window,
+    subject: &str,
+    series: &[Plotted],
+    range: impl Fn(&[f64]) -> (f64, f64),
+    note: Option<String>,
+    rendering: Rendering,
+) -> String {
+    let values: Vec<f64> = series
+        .iter()
+        .flat_map(|p| [p.point, p.trend])
+        .flatten()
+        .collect();
+    let (bottom, top) = range(&values);
+    // Both in dot coordinates: x across the body, y up from its bottom.
+    let at = |index: usize, value: f64| -> (u32, u32) {
+        let dot = ((value - bottom) / (top - bottom) * CHART_DOTS_HIGH as f64).round();
+        (2 * window.column(index) as u32, dot as u32)
+    };
+    let line: Vec<(u32, u32)> = series
+        .iter()
+        .enumerate()
+        .filter_map(|(i, p)| p.trend.map(|t| at(i, t)))
+        .collect();
+    let points: Vec<(u32, u32)> = series
+        .iter()
+        .enumerate()
+        .filter_map(|(i, p)| p.point.map(|v| at(i, v)))
+        .collect();
+    let mut rows = braille_rows(window.columns, &line, &points, rendering.color);
+    for &(x, y) in &points {
+        let row = (CHART_DOTS_HIGH - y as usize) / 4;
+        rows[row] = replace_visible(&rows[row], x as usize / 2, SESSION_MARKER);
+    }
+
+    let count = window.sessions.len();
+    let title = format!("{subject} · {count} {}", plural(count, "session"));
+    let annotations: Vec<String> = note
+        .into_iter()
+        .chain(std::iter::once(CHART_LEGEND.to_string()))
+        .collect();
+    let mut out = chart_header(title, &annotations, rendering.width);
+    let rule = "─".repeat(window.columns);
+    let _ = writeln!(out, "┌{rule}┐");
+    for (index, row) in rows.iter().enumerate() {
+        let _ = write!(out, "│{row}│");
+        if index % LABEL_ROWS == 0 {
+            let value = top - (top - bottom) * index as f64 / (CHART_ROWS - 1) as f64;
+            let _ = write!(out, " {value:.0}");
+        }
+        out.push('\n');
+    }
+    let _ = writeln!(out, "└{rule}┘");
     let _ = writeln!(
         out,
-        "{first}{last:>rest$}",
-        rest = width
-            .saturating_sub(first.chars().count())
-            .max(last.chars().count() + 1)
+        " {}{:>rest$}",
+        window.first,
+        window.last,
+        rest = window.columns + 1 - window.first.chars().count()
     );
-    Some(out)
+    out
 }
 
-/// The columns a chart body takes at the width given: what is left after
-/// the label margin, and never fewer than the library draws.
-fn chart_columns(width: u16) -> usize {
-    (width as usize)
-        .saturating_sub(Y_LABEL_MARGIN)
-        .max(MIN_CHART_COLUMNS)
+/// A chart's header: the title, then each annotation after three spaces
+/// while the line stays within `width`, otherwise on a line of its own
+/// indented one space, from which the next annotation continues by the
+/// same rule. The terminal edge is what wraps text, so the width is the
+/// terminal's, not the chart's.
+fn chart_header(title: String, annotations: &[String], width: u16) -> String {
+    let mut lines = vec![title];
+    for annotation in annotations {
+        let line = lines.last_mut().expect("the title is always there");
+        let joined = line.chars().count() + ANNOTATION_GAP.len() + annotation.chars().count();
+        if joined <= width as usize {
+            line.push_str(ANNOTATION_GAP);
+            line.push_str(annotation);
+        } else {
+            lines.push(format!(" {annotation}"));
+        }
+    }
+    lines.push(String::new());
+    lines.join("\n")
 }
 
-/// How many sessions a chart at the width given can tell apart: one per
-/// column of its body, each column being two braille dots wide.
-fn points_that_fit(width: u16) -> usize {
-    chart_columns(width)
+/// `row` with the character at visible `column` replaced by `with`, escape
+/// sequences (`ESC [ … m`) passed over without being counted.
+fn replace_visible(row: &str, column: usize, with: char) -> String {
+    let mut out = String::with_capacity(row.len());
+    let mut chars = row.chars();
+    let mut seen = 0;
+    while let Some(c) = chars.next() {
+        if c == '\x1b' {
+            out.push(c);
+            for escaped in chars.by_ref() {
+                out.push(escaped);
+                if escaped == 'm' {
+                    break;
+                }
+            }
+            continue;
+        }
+        out.push(if seen == column { with } else { c });
+        seen += 1;
+    }
+    out
 }
 
-/// The y axis for speeds: the data rounded out to multiples of ten, then
-/// widened by ten at each end until it spans at least twenty, so that its
-/// labels stay round and a few points of noise are not drawn as a cliff.
-/// Never below zero.
+/// The y axis for speeds: the data rounded out to multiples of ten, widened
+/// by ten at each end until it spans at least twenty, then by ten at the
+/// top if the span is an odd number of tens, so that it is a multiple of
+/// twenty and the label every quarter of the way is a multiple of five.
+/// Never below zero: the axis is shifted up instead.
 fn speed_range(values: &[f64]) -> (f64, f64) {
     let (min, max) = extent(values);
     let mut bottom = (min / SPEED_STEP).floor() * SPEED_STEP;
     let mut top = (max / SPEED_STEP).ceil() * SPEED_STEP;
     while top - bottom < SPEED_SPAN_MIN {
         bottom -= SPEED_STEP;
+        top += SPEED_STEP;
+    }
+    if (((top - bottom) / SPEED_STEP).round() as i64) % 2 == 1 {
         top += SPEED_STEP;
     }
     if bottom < 0.0 {
@@ -867,13 +1041,15 @@ fn speed_range(values: &[f64]) -> (f64, f64) {
     (bottom, top)
 }
 
-/// The y axis for accuracies, in percent: 100 at the top, the data minimum
-/// rounded down to a multiple of five at the bottom, and never narrower
-/// than ten points.
+/// The y axis for accuracies, in percent: 100 at the top, and a span
+/// covering the data minimum rounded up to a multiple of four, never less
+/// than eight, so that the labels are whole numbers and the axis runs from
+/// just below the lowest accuracy shown, keeping small differences visible
+/// without drawing one slightly imperfect session as a cliff.
 fn accuracy_range(values: &[f64]) -> (f64, f64) {
     let (min, _) = extent(values);
-    let bottom = ((min / ACCURACY_STEP).floor() * ACCURACY_STEP).min(100.0 - ACCURACY_SPAN_MIN);
-    (bottom, 100.0)
+    let span = (((100.0 - min) / ACCURACY_STEP).ceil() * ACCURACY_STEP).max(ACCURACY_SPAN_MIN);
+    (100.0 - span, 100.0)
 }
 
 /// The smallest and largest of the values.
@@ -885,36 +1061,46 @@ fn extent(values: &[f64]) -> (f64, f64) {
         })
 }
 
-/// The body of a trend chart: `points` as dots and `line` as a line, both
-/// at x positions `0..n`, on a braille canvas [`CHART_ROWS`] rows tall and
-/// as wide as the width allows, with `bottom` and `top` as whole-number
-/// labels at the right of its last and first rows. The line is drawn first
-/// and in green when color is on, the points after it in the terminal's own
-/// color, so that a cell both fall in shows the point. The library colors
-/// through `colored`, which honors `NO_COLOR` on its own as well. The one
-/// place the chart library is used; its x labels are left off in favor of
-/// the footer.
-fn braille_chart(
-    points: &[(f32, f32)],
-    line: &[(f32, f32)],
-    bottom: f64,
-    top: f64,
-    rendering: Rendering,
-) -> String {
-    // The canvas draws its right-hand column and top row of dots as a
-    // column and row of their own, so it is one column and one row larger
-    // than its size in dots suggests.
-    let dots_wide = 2 * (chart_columns(rendering.width) - 1) as u32;
-    let dots_high = 4 * (CHART_ROWS - 1) as u32;
-    let xmax = (points.len().max(2) - 1) as f32;
-    let dots = Shape::Points(points);
-    let trend = Shape::Lines(line);
-    let mut chart =
-        Chart::new_with_y_range(dots_wide, dots_high, 0.0, xmax, bottom as f32, top as f32);
+/// The body of a trend chart: [`CHART_ROWS`] rows of braille, each
+/// `columns` cells wide, with `line` drawn as one polyline and `points` as
+/// single dots, both in dot coordinates (x across the body, y up from its
+/// bottom) that the canvas's ranges are set to, so nothing is rescaled. The
+/// line is drawn first, in green when color is on; the points after it
+/// uncolored, which clears the line's color from any cell a point falls
+/// in, so that a marker put over that cell is in the terminal's own color.
+/// The library colors through `colored`, which honors `NO_COLOR` on its
+/// own as well. The one place the chart library is used: its axes are not
+/// drawn and its labels are left off, in favor of the frame and labels
+/// composed around these rows.
+fn braille_rows(
+    columns: usize,
+    line: &[(u32, u32)],
+    points: &[(u32, u32)],
+    color: bool,
+) -> Vec<String> {
+    // As with its top row, the canvas draws its right-hand column of dots
+    // as a column of its own, so it is one column wider than its size in
+    // dots suggests.
+    let dots_wide = 2 * (columns - 1) as u32;
+    let dots_high = CHART_DOTS_HIGH as u32;
+    let as_f32 = |dots: &[(u32, u32)]| -> Vec<(f32, f32)> {
+        dots.iter().map(|&(x, y)| (x as f32, y as f32)).collect()
+    };
+    let (line, points) = (as_f32(line), as_f32(points));
+    let trend = Shape::Lines(&line);
+    let dots = Shape::Points(&points);
+    let mut chart = Chart::new_with_y_range(
+        dots_wide,
+        dots_high,
+        0.0,
+        dots_wide as f32,
+        0.0,
+        dots_high as f32,
+    );
     let styled = chart
         .x_label_format(LabelFormat::None)
-        .y_label_format(LabelFormat::Custom(Box::new(|v| format!("{v:.0}"))));
-    let with_trend = if rendering.color {
+        .y_label_format(LabelFormat::None);
+    let with_trend = if color {
         styled.linecolorplot(&trend, TREND_GREEN)
     } else {
         styled.lineplot(&trend)
@@ -922,12 +1108,14 @@ fn braille_chart(
     let drawn = with_trend.lineplot(&dots);
     drawn.figures();
     let text = drawn.to_string();
-    // The library ends with a row for x labels, blank here.
-    let mut rows: Vec<&str> = text.lines().collect();
+    // The library puts a space for its own y labels after the first and
+    // last rows, and ends with a row for x labels, blank here.
+    let mut rows: Vec<String> = text
+        .lines()
+        .map(|row| row.strip_suffix(' ').unwrap_or(row).to_string())
+        .collect();
     rows.pop();
-    let mut body = rows.join("\n");
-    body.push('\n');
-    body
+    rows
 }
 
 /// A column of a bordered table.
@@ -1886,50 +2074,65 @@ mod tests {
     // --- The trend charts --------------------------------------------------
 
     #[test]
-    fn the_speed_axis_is_rounded_to_tens_and_spans_at_least_twenty() {
-        assert_eq!(speed_range(&[103.0, 128.0]), (100.0, 130.0));
-        // Already round: nothing moves.
-        assert_eq!(speed_range(&[100.0, 130.0]), (100.0, 130.0));
-        // Within one ten: widened by ten at each end, so the labels stay
-        // multiples of ten.
-        assert_eq!(speed_range(&[112.0, 118.0]), (100.0, 130.0));
+    fn the_speed_axis_spans_a_multiple_of_twenty_with_labels_at_multiples_of_five() {
+        assert_eq!(speed_range(&[103.0, 128.0]), (100.0, 140.0));
+        // An odd number of tens is widened at the top.
+        assert_eq!(speed_range(&[100.0, 130.0]), (100.0, 140.0));
+        // Within one ten: widened by ten at each end, then made even.
+        assert_eq!(speed_range(&[112.0, 118.0]), (100.0, 140.0));
         assert_eq!(speed_range(&[120.0, 120.0]), (110.0, 130.0));
         // Never below zero: the widened axis is shifted up instead.
-        assert_eq!(speed_range(&[5.0, 5.0]), (0.0, 30.0));
+        assert_eq!(speed_range(&[5.0, 5.0]), (0.0, 40.0));
     }
 
     #[test]
-    fn the_accuracy_axis_tops_at_a_hundred_and_spans_at_least_ten() {
+    fn the_accuracy_axis_runs_from_just_below_the_lowest_accuracy_to_a_hundred() {
+        assert_eq!(accuracy_range(&[96.3, 100.0]), (92.0, 100.0));
+        assert_eq!(accuracy_range(&[100.0, 100.0]), (92.0, 100.0));
+        assert_eq!(accuracy_range(&[93.0, 100.0]), (92.0, 100.0));
+        assert_eq!(accuracy_range(&[89.0, 100.0]), (88.0, 100.0));
         assert_eq!(accuracy_range(&[83.3, 100.0]), (80.0, 100.0));
-        assert_eq!(accuracy_range(&[96.0, 99.0]), (90.0, 100.0));
-        assert_eq!(accuracy_range(&[100.0, 100.0]), (90.0, 100.0));
-        assert_eq!(accuracy_range(&[90.0, 95.0]), (90.0, 100.0));
-        assert_eq!(accuracy_range(&[62.5]), (60.0, 100.0));
+        assert_eq!(accuracy_range(&[62.5, 100.0]), (60.0, 100.0));
     }
 
-    #[test]
-    fn one_session_fits_per_column_after_the_label_margin() {
-        assert_eq!(points_that_fit(80), 76);
-        assert_eq!(points_that_fit(40), 36);
-        // The chart is never drawn narrower than the library allows.
-        assert_eq!(points_that_fit(10), MIN_CHART_COLUMNS);
-    }
-
-    /// A session's figures for the charts: when it started, its speed on
-    /// standard text and the recent series with it, and its raw accuracy.
-    fn charted<'a>(
+    /// A session's figures for the charts: its id, when it started, its
+    /// speed on standard text and the recent series with it, and its raw
+    /// accuracy.
+    fn charted_session<'a>(
+        id: &str,
         when: &'a str,
         reference: Option<f64>,
         recent_reference: Option<f64>,
         raw_accuracy: f64,
     ) -> ListedSession<'a> {
         ListedSession {
+            id: id.parse().unwrap(),
             when,
             reference,
             recent_reference,
             raw_accuracy,
             ..listed(None, None)
         }
+    }
+
+    /// The ids and dates of `count` sessions a day apart from the 1st of
+    /// January 2024, most recent first, ids from 1; the strings the
+    /// sessions from [`steady`] borrow.
+    fn ids_and_dates(count: usize) -> (Vec<String>, Vec<String>) {
+        let ids: Vec<String> = (1..=count).rev().map(|i| i.to_string()).collect();
+        let dates: Vec<String> = (0..count)
+            .rev()
+            .map(|i| format!("2024-{:02}-{:02} 08:00", 1 + i / 28, 1 + i % 28))
+            .collect();
+        (ids, dates)
+    }
+
+    /// One session per id and date, every one at 120 wpm and perfect.
+    fn steady<'a>(ids: &'a [String], dates: &'a [String]) -> Vec<ListedSession<'a>> {
+        ids.iter()
+            .zip(dates)
+            .map(|(id, date)| charted_session(id, date, Some(120.0), Some(120.0), 1.0))
+            .collect()
     }
 
     fn plain(width: u16) -> Rendering {
@@ -1939,101 +2142,345 @@ mod tests {
         }
     }
 
-    /// The whole-number label at the right end of a chart row.
-    fn label(row: &str) -> u32 {
-        row.rsplit_once(' ')
-            .unwrap_or_else(|| panic!("{row:?}"))
-            .1
-            .parse()
-            .unwrap_or_else(|_| panic!("{row:?}"))
+    /// A chart taken apart: the header lines, the borders, the body rows
+    /// between the two `│` with the label after each, and the footer.
+    struct Parsed<'a> {
+        header: Vec<&'a str>,
+        top: &'a str,
+        rows: Vec<&'a str>,
+        labels: Vec<Option<u32>>,
+        bottom: &'a str,
+        footer: &'a str,
+    }
+
+    fn parse(chart: &str) -> Parsed<'_> {
+        let lines: Vec<&str> = chart.lines().collect();
+        let top = lines
+            .iter()
+            .position(|l| l.starts_with('┌'))
+            .unwrap_or_else(|| panic!("{chart}"));
+        let bottom = lines
+            .iter()
+            .position(|l| l.starts_with('└'))
+            .unwrap_or_else(|| panic!("{chart}"));
+        assert_eq!(lines.len(), bottom + 2, "{chart}");
+        let mut rows = Vec::new();
+        let mut labels = Vec::new();
+        for line in &lines[top + 1..bottom] {
+            let (row, rest) = line
+                .strip_prefix('│')
+                .and_then(|l| l.split_once('│'))
+                .unwrap_or_else(|| panic!("{line:?}"));
+            rows.push(row);
+            labels.push(
+                rest.strip_prefix(' ')
+                    .map(|l| l.parse().unwrap_or_else(|_| panic!("{line:?}"))),
+            );
+            assert!(rest.is_empty() || rest.starts_with(' '), "{line:?}");
+        }
+        Parsed {
+            header: lines[..top].to_vec(),
+            top: lines[top],
+            rows,
+            labels,
+            bottom: lines[bottom],
+            footer: lines[bottom + 1],
+        }
+    }
+
+    /// The column of every session marker in the body, in column order.
+    fn markers(rows: &[&str]) -> Vec<usize> {
+        let mut columns: Vec<usize> = rows
+            .iter()
+            .flat_map(|row| {
+                row.chars()
+                    .enumerate()
+                    .filter(|(_, c)| *c == SESSION_MARKER)
+                    .map(|(i, _)| i)
+            })
+            .collect();
+        columns.sort_unstable();
+        columns
+    }
+
+    fn is_braille(c: char) -> bool {
+        ('\u{2801}'..='\u{28ff}').contains(&c)
     }
 
     fn has_braille(rows: &[&str]) -> bool {
+        rows.iter().flat_map(|row| row.chars()).any(is_braille)
+    }
+
+    /// Whether any row has a braille cell (not blank) at `column`.
+    fn braille_at(rows: &[&str], column: usize) -> bool {
         rows.iter()
-            .flat_map(|row| row.chars())
-            .any(|c| ('\u{2801}'..='\u{28ff}').contains(&c))
+            .any(|row| row.chars().nth(column).is_some_and(is_braille))
+    }
+
+    /// The labels a chart's axis from `bottom` to `top` carries on rows 0,
+    /// 3, 6, 9, and 12, and nothing elsewhere.
+    fn expected_labels(bottom: u32, top: u32) -> Vec<Option<u32>> {
+        (0..CHART_ROWS)
+            .map(|r| (r % LABEL_ROWS == 0).then(|| top - (top - bottom) * r as u32 / 12))
+            .collect()
     }
 
     #[test]
-    fn the_speed_chart_titles_labels_and_foots_a_two_point_series() {
+    fn the_body_grows_six_columns_a_session_between_the_footer_and_the_box() {
+        let (ids, dates) = ids_and_dates(30);
+        let width = |count: usize, columns: u16| {
+            let figures = steady(&ids[..count], &dates[..count]);
+            Window::new(&charted(&figures), columns).columns
+        };
+        assert_eq!(width(3, 80), 32);
+        assert_eq!(width(8, 80), 48);
+        assert_eq!(width(12, 80), 72);
+        assert_eq!(width(30, 80), 72);
+        // A narrow terminal, not the box, caps the body.
+        assert_eq!(width(12, 60), 54);
+        // Long ids widen the footer and so the narrowest body.
+        let figures = [
+            charted_session("10002", "2024-01-17 08:00", Some(120.0), Some(120.0), 1.0),
+            charted_session("10001", "2024-01-16 08:00", Some(120.0), Some(120.0), 1.0),
+            charted_session("10000", "2024-01-15 08:00", Some(120.0), Some(120.0), 1.0),
+        ];
+        assert_eq!(Window::new(&charted(&figures), 80).columns, 38);
+        assert_eq!(sessions_that_fit(80), 72);
+    }
+
+    #[test]
+    fn a_two_session_speed_chart_is_a_framed_box_with_markers_labels_and_a_footer() {
         // Most recent first, as the view holds them.
         let figures = [
-            charted("2024-01-17 08:00", Some(128.0), Some(124.0), 1.0),
-            charted("2024-01-15 10:30", Some(103.0), Some(103.0), 1.0),
+            charted_session("4", "2024-01-17 08:00", Some(128.0), Some(124.0), 1.0),
+            charted_session("2", "2024-01-16 10:30", Some(103.0), Some(103.0), 1.0),
         ];
-        let chart = speed_chart(&figures, plain(80)).unwrap();
-        let rows: Vec<&str> = chart.lines().collect();
-        assert_eq!(rows[0], "speed on standard text · 2 sessions");
-        // Eight rows of chart between the title and the footer, labeled at
-        // the top and bottom.
-        assert_eq!(rows.len(), 1 + CHART_ROWS + 1, "{chart}");
-        assert_eq!(label(rows[1]), 130, "{chart}");
-        assert_eq!(label(rows[CHART_ROWS]), 100, "{chart}");
-        assert!(has_braille(&rows[1..=CHART_ROWS]), "{chart}");
-        // The footer spans the chart's width with a date at each end; no
-        // row carries a numeric x label.
-        let footer = rows[CHART_ROWS + 1];
-        assert!(footer.starts_with("2024-01-15"), "{footer:?}");
-        assert!(footer.ends_with("2024-01-17"), "{footer:?}");
-        assert_eq!(footer.chars().count(), 80, "{footer:?}");
-        assert!(!chart.contains("0.0"), "{chart}");
-        assert!(!chart.contains('\x1b'), "{chart}");
-    }
-
-    #[test]
-    fn the_speed_chart_leaves_out_sessions_without_a_speed_on_standard_text() {
-        let figures = [
-            charted("2024-01-17 08:00", Some(128.0), Some(124.0), 1.0),
-            charted("2024-01-16 08:00", None, None, 1.0),
-            charted("2024-01-15 10:30", Some(103.0), Some(103.0), 1.0),
-        ];
-        let chart = speed_chart(&figures, plain(80)).unwrap();
+        let charts = charts(&figures, plain(80));
+        let chart = &charts[0];
+        let parsed = parse(chart);
+        assert_eq!(
+            parsed.header,
+            ["speed on standard text · 2 sessions   • session  ⠒ trend"]
+        );
+        assert_eq!(parsed.top, format!("┌{}┐", "─".repeat(32)), "{chart}");
+        assert_eq!(parsed.bottom, format!("└{}┘", "─".repeat(32)), "{chart}");
+        assert_eq!(parsed.rows.len(), CHART_ROWS, "{chart}");
         assert!(
-            chart.starts_with("speed on standard text · 2 sessions\n"),
+            parsed.rows.iter().all(|row| row.chars().count() == 32),
             "{chart}"
         );
-        // One point is not a trend: the chart is left out.
-        assert_eq!(speed_chart(&figures[..2], plain(80)), None);
+        assert_eq!(parsed.labels, expected_labels(100, 140), "{chart}");
+        assert_eq!(markers(&parsed.rows), [0, 31], "{chart}");
+        assert!(has_braille(&parsed.rows), "{chart}");
+        assert_eq!(parsed.footer, " #2 · 2024-01-16   #4 · 2024-01-17");
+        assert_eq!(parsed.footer.chars().count(), 34, "{chart}");
+        assert!(!chart.contains('\x1b'), "{chart}");
+        assert!(!chart.contains("0.0"), "{chart}");
     }
 
     #[test]
-    fn the_accuracy_chart_counts_every_session_and_tops_at_a_hundred() {
+    fn the_header_wraps_at_the_terminal_edge_not_the_chart() {
         let figures = [
-            charted("2024-01-17 08:00", Some(128.0), Some(124.0), 1.0),
-            charted("2024-01-16 08:00", None, None, 0.833),
-            charted("2024-01-15 10:30", Some(103.0), Some(103.0), 1.0),
+            charted_session("4", "2024-01-17 08:00", Some(128.0), Some(124.0), 1.0),
+            charted_session("2", "2024-01-16 10:30", Some(103.0), Some(103.0), 1.0),
         ];
-        let chart = accuracy_chart(&figures, plain(80)).unwrap();
-        let rows: Vec<&str> = chart.lines().collect();
-        assert_eq!(rows[0], "accuracy · 3 sessions");
-        assert_eq!(label(rows[1]), 100, "{chart}");
-        assert_eq!(label(rows[CHART_ROWS]), 80, "{chart}");
-        assert!(has_braille(&rows[1..=CHART_ROWS]), "{chart}");
-        let footer = rows[CHART_ROWS + 1];
-        assert!(footer.starts_with("2024-01-15"), "{footer:?}");
-        assert!(footer.ends_with("2024-01-17"), "{footer:?}");
+        let wide = charts(&figures, plain(80));
+        let narrow = charts(&figures, plain(44));
+        let (wide, narrow) = (parse(&wide[0]), parse(&narrow[0]));
+        assert_eq!(wide.header.len(), 1);
+        assert_eq!(wide.header[0].chars().count(), 56);
+        assert_eq!(
+            narrow.header,
+            ["speed on standard text · 2 sessions", " • session  ⠒ trend"]
+        );
+        assert_eq!(wide.rows, narrow.rows);
+        assert_eq!(wide.labels, narrow.labels);
+        assert_eq!((wide.top, wide.bottom), (narrow.top, narrow.bottom));
+        assert_eq!(wide.footer, narrow.footer);
+
+        let with_gap = [
+            charted_session("4", "2024-01-17 08:00", Some(128.0), Some(124.0), 1.0),
+            charted_session("2", "2024-01-16 10:30", None, None, 1.0),
+            charted_session("1", "2024-01-15 10:30", Some(103.0), Some(103.0), 1.0),
+        ];
+        let wide = charts(&with_gap, plain(80));
+        assert_eq!(
+            parse(&wide[0]).header,
+            [
+                "speed on standard text · 3 sessions   1 without a speed on standard text",
+                " • session  ⠒ trend"
+            ]
+        );
+        assert_eq!(parse(&wide[0]).header[0].chars().count(), 72);
+        let narrow = charts(&with_gap, plain(44));
+        assert_eq!(
+            parse(&narrow[0]).header,
+            [
+                "speed on standard text · 3 sessions",
+                " 1 without a speed on standard text",
+                " • session  ⠒ trend"
+            ]
+        );
     }
 
     #[test]
-    fn a_chart_keeps_the_most_recent_sessions_that_fit() {
-        // Sixty sessions, oldest first: twenty-eight a month from January.
-        let dates: Vec<String> = (0..60)
-            .map(|i| format!("2024-{:02}-{:02} 08:00", 1 + i / 28, 1 + i % 28))
-            .collect();
-        let figures: Vec<ListedSession> = dates
-            .iter()
-            .rev()
-            .map(|d| charted(d.as_str(), Some(120.0), Some(120.0), 1.0))
-            .collect();
-        // At 40 columns, 36 sessions fit: the 36 most recent, so the footer
-        // runs from the 25th session to the last.
-        let chart = speed_chart(&figures, plain(40)).unwrap();
-        let rows: Vec<&str> = chart.lines().collect();
-        assert_eq!(rows[0], "speed on standard text · 36 sessions");
-        let footer = rows[CHART_ROWS + 1];
-        assert!(footer.starts_with("2024-01-25"), "{footer:?}");
-        assert!(footer.ends_with("2024-03-04"), "{footer:?}");
-        assert_eq!(footer.chars().count(), 40, "{footer:?}");
+    fn both_charts_share_one_session_axis_and_the_speed_line_bridges_a_missing_session() {
+        let figures = [
+            charted_session("4", "2024-01-17 08:00", Some(128.0), Some(124.0), 1.0),
+            charted_session("2", "2024-01-16 10:30", None, None, 0.833),
+            charted_session("1", "2024-01-15 10:30", Some(103.0), Some(103.0), 1.0),
+        ];
+        let charts = charts(&figures, plain(80));
+        assert_eq!(charts.len(), 2);
+        let (speed, accuracy) = (parse(&charts[0]), parse(&charts[1]));
+        assert!(
+            speed.header[0].starts_with("speed on standard text · 3 sessions   1 without"),
+            "{}",
+            charts[0]
+        );
+        assert_eq!(
+            accuracy.header,
+            ["accuracy · 3 sessions   • session  ⠒ trend"]
+        );
+        assert_eq!(speed.top, accuracy.top);
+        assert_eq!(speed.top.chars().count(), 34);
+        assert_eq!(speed.footer, accuracy.footer);
+        assert!(
+            speed.footer.starts_with(" #1 · 2024-01-15"),
+            "{}",
+            speed.footer
+        );
+        assert!(
+            speed.footer.ends_with("#4 · 2024-01-17"),
+            "{}",
+            speed.footer
+        );
+        assert_eq!(markers(&accuracy.rows), [0, 16, 31], "{}", charts[1]);
+        assert_eq!(markers(&speed.rows), [0, 31], "{}", charts[0]);
+        assert!(braille_at(&speed.rows, 16), "{}", charts[0]);
+        assert_eq!(accuracy.labels, expected_labels(80, 100), "{}", charts[1]);
+    }
+
+    #[test]
+    fn the_speed_chart_is_left_out_with_one_speed_but_the_accuracy_chart_stays() {
+        let figures = [
+            charted_session("4", "2024-01-17 08:00", Some(128.0), Some(124.0), 1.0),
+            charted_session("2", "2024-01-16 10:30", None, None, 0.833),
+            charted_session("1", "2024-01-15 10:30", None, None, 1.0),
+        ];
+        let charts = charts(&figures, plain(80));
+        assert_eq!(charts.len(), 1, "{charts:?}");
+        assert!(
+            charts[0].starts_with("accuracy · 3 sessions   "),
+            "{}",
+            charts[0]
+        );
+    }
+
+    #[test]
+    fn the_trend_is_the_only_colored_element_and_no_marker_inherits_its_color() {
+        // The library colors only when stdout is a terminal and `NO_COLOR`
+        // is unset; forced on here, for the whole test binary, so that the
+        // assertions hold under a pipe. No other test asks for color.
+        colored::control::set_override(true);
+        let figures = [
+            charted_session("4", "2024-01-17 08:00", Some(128.0), Some(124.0), 1.0),
+            charted_session("3", "2024-01-16 10:30", Some(110.0), Some(108.0), 0.9),
+            charted_session("1", "2024-01-15 10:30", Some(103.0), Some(103.0), 1.0),
+        ];
+        let rendering = Rendering {
+            width: 80,
+            color: true,
+        };
+        for chart in charts(&figures, rendering) {
+            let parsed = parse(&chart);
+            assert!(
+                parsed
+                    .rows
+                    .iter()
+                    .any(|row| row.contains("\x1b[38;2;46;160;67m")),
+                "{chart}"
+            );
+            for row in &parsed.rows {
+                let mut active = false;
+                let mut rest = *row;
+                while let Some(c) = rest.chars().next() {
+                    if c == '\x1b' {
+                        let end = rest.find('m').unwrap_or_else(|| panic!("{row:?}"));
+                        let sequence = &rest[..=end];
+                        active = match sequence {
+                            "\x1b[0m" | "\x1b[39m" => false,
+                            s if s.starts_with("\x1b[38;") => true,
+                            s => panic!("{s:?} in {row:?}"),
+                        };
+                        rest = &rest[end + 1..];
+                        continue;
+                    }
+                    assert!(
+                        !(c == SESSION_MARKER && active),
+                        "a marker in the trend's color: {row:?}"
+                    );
+                    rest = &rest[c.len_utf8()..];
+                }
+            }
+            // Nothing but the body carries color.
+            for line in parsed
+                .header
+                .iter()
+                .chain([&parsed.footer, &parsed.top, &parsed.bottom])
+            {
+                assert!(!line.contains('\x1b'), "{line:?}");
+            }
+            assert_eq!(markers(&parsed.rows).len(), 3, "{chart}");
+        }
+    }
+
+    #[test]
+    fn the_charts_keep_the_most_recent_sessions_that_fit() {
+        let (ids, dates) = ids_and_dates(60);
+        let figures = steady(&ids, &dates);
+        // All sixty fit the box at 80 columns.
+        let wide = charts(&figures, plain(80));
+        let parsed = parse(&wide[0]);
+        assert!(
+            parsed.header[0].starts_with("speed on standard text · 60 sessions"),
+            "{}",
+            wide[0]
+        );
+        assert_eq!(parsed.top.chars().count(), 74, "{}", wide[0]);
+        assert_eq!(markers(&parsed.rows).len(), 60, "{}", wide[0]);
+        assert!(
+            parsed.footer.starts_with(" #1 · 2024-01-01"),
+            "{}",
+            parsed.footer
+        );
+        assert!(
+            parsed.footer.ends_with("#60 · 2024-03-04"),
+            "{}",
+            parsed.footer
+        );
+        // At 50 columns the body is 44 wide and holds the 44 most recent,
+        // so the footer starts at the seventeenth session.
+        let narrow = charts(&figures, plain(50));
+        let parsed = parse(&narrow[0]);
+        assert!(
+            parsed.header[0].starts_with("speed on standard text · 44 sessions"),
+            "{}",
+            narrow[0]
+        );
+        assert_eq!(parsed.top.chars().count(), 46, "{}", narrow[0]);
+        assert_eq!(markers(&parsed.rows).len(), 44, "{}", narrow[0]);
+        assert!(
+            parsed.footer.starts_with(" #17 · 2024-01-17"),
+            "{}",
+            parsed.footer
+        );
+        assert!(
+            parsed.footer.ends_with("#60 · 2024-03-04"),
+            "{}",
+            parsed.footer
+        );
+        assert_eq!(parsed.footer.chars().count(), 46, "{}", parsed.footer);
     }
 
     #[test]

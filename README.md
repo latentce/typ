@@ -107,17 +107,23 @@ you are.
 
 Below that, once you have two sessions, two charts: your speed on standard
 text, then your accuracy, over your recent sessions, oldest on the left.
-Each session is a point and the trend is the line drawn through them, so a
-single noisy session stands apart from where you are heading: the speed line
-is your recent series, the accuracy line the mean of your last five sessions.
-The speed chart plots speed on standard text rather than the WPM of each
-prompt, for the same reason as the headline: practice prompts differ in
-difficulty from session to session, so the prompt's own WPM would draw a hard
-prompt as a slow day. (A session whose speed on standard text is not yet
-known is left out of that chart rather than drawn at zero.) Both charts use
-the width of your terminal (more sessions fit in a wider one), are titled
-with how many sessions they cover, and footed with the dates of the first
-and last. The trend line is green where color is available and the charts
+Each is a framed box with a legend: every session is a `•`, and the trend is
+the line drawn through them, so a single noisy session stands apart from
+where you are heading: the speed line is your recent series, the accuracy
+line the mean of your last five sessions. The two charts share one session
+axis, each session in the same column of both, so a session's speed and
+accuracy sit one above the other; the footer names the first and last
+sessions shown as `#id · date`. The speed chart plots speed on standard
+text rather than the WPM of each prompt, for the same reason as the
+headline: practice prompts differ in difficulty from session to session, so
+the prompt's own WPM would draw a hard prompt as a slow day. (A session
+whose speed on standard text is not yet known leaves a gap in that chart,
+which the line runs across, rather than being drawn at zero.) The boxes
+grow with the number of sessions up to a fixed size and shrink only in a
+terminal narrower than that; a wider terminal does not stretch them. The
+accuracy axis runs from just below your lowest recent accuracy to 100, so
+small differences stay visible instead of being squashed into the top of
+the box. The trend line is green where color is available and the charts
 read the same without it.
 
 Then a table of your last ten sessions (id, when, words, wpm, speed on

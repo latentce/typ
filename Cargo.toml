@@ -24,5 +24,6 @@ crossterm = { version = "0.29", default-features = false, features = ["events", 
 rusqlite = { version = "0.40", features = ["bundled"] }
 textplots = "0.8"
 rgb = "0.8"
+colored = "2"
 dirs = "7"
 tempfile = "3"

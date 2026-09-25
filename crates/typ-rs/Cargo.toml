@@ -25,5 +25,6 @@ rgb = { workspace = true }
 textplots = { workspace = true }
 
 [dev-dependencies]
+colored = { workspace = true }
 rusqlite = { workspace = true }
 tempfile = { workspace = true }
