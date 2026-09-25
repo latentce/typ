@@ -2,13 +2,17 @@
 //!
 //! This is a pure function of the session state and the viewport: the
 //! renderer diffs successive results to update only what changed, and
-//! re-lays out on resize. Nothing here writes to a terminal.
+//! re-lays out on resize. Nothing here writes to a terminal. The header
+//! shown above the prompt while typing (the live WPM and the elapsed time)
+//! is likewise a pure function of the state and a moment on the session
+//! clock; the caller decides when to ask.
 
 use unicode_width::UnicodeWidthChar;
 
+use crate::metrics::{elapsed_micros, final_characters, gross_wpm, gross_wpm_over};
 use crate::session::{MAX_EXTRAS, Outcome, SessionState};
 
-/// The area available for the prompt, in terminal cells.
+/// The area available for the prompt and its header, in terminal cells.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Viewport {
     pub columns: usize,
@@ -68,17 +72,25 @@ pub struct Caret {
     pub column: usize,
 }
 
-/// The visible window of the laid-out prompt.
+/// The visible window of the laid-out prompt, with the header above it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Display {
+    header: Option<Header>,
     lines: Vec<Vec<Cell>>,
     first_line: usize,
     total_lines: usize,
     caret: Option<Caret>,
+    columns: usize,
 }
 
 impl Display {
-    /// The lines to paint, at most the viewport's rows.
+    /// The header to paint on the row above the prompt, if there is one.
+    pub fn header(&self) -> Option<Header> {
+        self.header
+    }
+
+    /// The prompt lines to paint, at most the viewport's rows less the
+    /// header's.
     pub fn lines(&self) -> &[Vec<Cell>] {
         &self.lines
     }
@@ -98,6 +110,11 @@ impl Display {
     pub fn caret(&self) -> Option<Caret> {
         self.caret
     }
+
+    /// The width the display was laid out for, which the header must fit.
+    pub fn columns(&self) -> usize {
+        self.columns
+    }
 }
 
 /// Wraps the prompt at word boundaries into the viewport's width and picks
@@ -109,9 +126,14 @@ impl Display {
 /// viewport is split across lines rather than overflowing. When the prompt is
 /// taller than the viewport, the window keeps one line above the caret's line
 /// where possible, and shows the end of the prompt once the session is over.
-pub fn lay_out(state: &SessionState, viewport: Viewport) -> Display {
+/// A header takes the first row of the viewport, leaving the prompt one
+/// fewer; it does not otherwise touch the layout.
+pub fn lay_out(state: &SessionState, viewport: Viewport, header: Option<Header>) -> Display {
     let columns = viewport.columns.max(1);
-    let rows = viewport.rows.max(1);
+    let rows = viewport
+        .rows
+        .saturating_sub(usize::from(header.is_some()))
+        .max(1);
 
     let mut lines: Vec<Vec<Cell>> = vec![Vec::new()];
     let mut column = 0;
@@ -157,10 +179,128 @@ pub fn lay_out(state: &SessionState, viewport: Viewport) -> Display {
     });
 
     Display {
+        header,
         lines: visible,
         first_line,
         total_lines,
         caret,
+        columns,
+    }
+}
+
+/// The header shown above the prompt: the session's live WPM and elapsed
+/// time, and which of its states it is in, for the renderer to style.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Header {
+    /// Gross WPM as a whole number; `None` before there is a figure.
+    pub wpm: Option<u32>,
+    pub elapsed_micros: u64,
+    pub tone: Tone,
+}
+
+/// What a header's figures mean, which decides how they are styled.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Tone {
+    /// Before the first printable keystroke: there are no figures yet.
+    Placeholder,
+    /// Within 5% of the recent average, or nothing to compare with.
+    Neutral,
+    /// More than 5% above the recent average.
+    Faster,
+    /// More than 5% below the recent average.
+    Slower,
+    /// An interrupted session: the figures are shown but are not a result.
+    Muted,
+}
+
+/// A live figure needs at least this long, so that the first one is not a
+/// fraction of a second's wild swing.
+const MIN_LIVE_MICROS: u64 = 1_000_000;
+
+/// What the header should say at `now_micros` on the session clock, given
+/// the recent series of gross WPM (the recent average) to compare with.
+///
+/// Before the first printable keystroke it is the placeholder. While the
+/// session runs, the live WPM is the final characters typed so far over
+/// the time to `now`, not to the last keystroke, so that a pause pulls it
+/// down; it is absent for the first second. Once the session has ended,
+/// `now` is ignored: the figures come from the last event, through the
+/// same functions the results use, so the header freezes at what the
+/// results will print. An interrupted session's figures are muted.
+pub fn header(state: &SessionState, now_micros: u64, recent_wpm: Option<f64>) -> Header {
+    let Some(started) = state.started_at_micros() else {
+        return Header {
+            wpm: None,
+            elapsed_micros: 0,
+            tone: Tone::Placeholder,
+        };
+    };
+    let (elapsed, wpm) = match state.outcome() {
+        Some(_) => (elapsed_micros(state).unwrap_or(0), gross_wpm(state)),
+        None => {
+            let elapsed = now_micros.saturating_sub(started);
+            let wpm = (elapsed >= MIN_LIVE_MICROS)
+                .then(|| gross_wpm_over(final_characters(state), elapsed))
+                .flatten();
+            (elapsed, wpm)
+        }
+    };
+    let tone = match state.outcome() {
+        Some(Outcome::Interrupted) => Tone::Muted,
+        _ => compare(wpm, recent_wpm),
+    };
+    Header {
+        wpm: wpm.map(whole_wpm),
+        elapsed_micros: elapsed,
+        tone,
+    }
+}
+
+/// Faster or slower when more than 5% either side of the recent average;
+/// neutral within that band, without a recent average, or without a WPM.
+fn compare(wpm: Option<f64>, recent_wpm: Option<f64>) -> Tone {
+    match (wpm, recent_wpm) {
+        (Some(wpm), Some(recent)) if wpm > recent * 1.05 => Tone::Faster,
+        (Some(wpm), Some(recent)) if wpm < recent * 0.95 => Tone::Slower,
+        _ => Tone::Neutral,
+    }
+}
+
+/// Rounds as `{:.0}` formatting does (a tie goes to the even number), so
+/// that the header's WPM is the number the results line prints.
+fn whole_wpm(wpm: f64) -> u32 {
+    wpm.round_ties_even() as u32
+}
+
+impl Header {
+    /// `{wpm} wpm   {m}:{ss}`, with an em dash for an absent WPM. Every
+    /// character is one column wide.
+    pub fn text(&self) -> String {
+        let seconds = self.elapsed_micros / 1_000_000;
+        let wpm = self
+            .wpm
+            .map_or_else(|| "—".to_string(), |wpm| wpm.to_string());
+        format!("{wpm} wpm   {}:{:02}", seconds / 60, seconds % 60)
+    }
+
+    /// The header's style by tone under a palette: the placeholder and a
+    /// muted header are shown as untyped text is; faster is green and
+    /// slower the red of a mistake, and both are plain text without color,
+    /// so that a number stays a number.
+    pub fn style(&self, palette: Palette) -> Style {
+        let plain = Style::default();
+        match (self.tone, palette) {
+            (Tone::Placeholder | Tone::Muted, _) => CellClass::Untyped.style(palette),
+            (Tone::Faster, Palette::Color) => Style {
+                foreground: Foreground::Green,
+                ..plain
+            },
+            (Tone::Slower, Palette::Color) => Style {
+                foreground: Foreground::Red,
+                ..plain
+            },
+            (Tone::Neutral | Tone::Faster | Tone::Slower, _) => plain,
+        }
     }
 }
 
@@ -254,6 +394,8 @@ pub enum Foreground {
     /// Extras: wrong like a mistake, but not a character of the prompt, so a
     /// step darker.
     DarkRed,
+    /// A live WPM running ahead of the recent average.
+    Green,
 }
 
 /// Terminal attributes for one cell class under a palette.

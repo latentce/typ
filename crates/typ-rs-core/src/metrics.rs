@@ -43,9 +43,19 @@ pub fn elapsed_micros(state: &SessionState) -> Option<u64> {
 /// Gross words per minute: final characters over five over elapsed minutes.
 /// `None` when no time has elapsed.
 pub fn gross_wpm(state: &SessionState) -> Option<f64> {
-    let elapsed = elapsed_micros(state).filter(|&e| e > 0)?;
-    let minutes = elapsed as f64 / 60_000_000.0;
-    Some(final_characters(state) as f64 / 5.0 / minutes)
+    gross_wpm_over(final_characters(state), elapsed_micros(state)?)
+}
+
+/// Gross words per minute over `characters` final characters typed in
+/// `elapsed_micros`: what [`gross_wpm`] measures to the last event, and
+/// what the live WPM measures to the current moment. `None` when no time
+/// has elapsed.
+pub fn gross_wpm_over(characters: usize, elapsed_micros: u64) -> Option<f64> {
+    if elapsed_micros == 0 {
+        return None;
+    }
+    let minutes = elapsed_micros as f64 / 60_000_000.0;
+    Some(characters as f64 / 5.0 / minutes)
 }
 
 /// Correctness of the submitted text after corrections: target characters

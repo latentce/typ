@@ -1,35 +1,40 @@
 //! Turns successive [`Display`]s into the bytes that update the terminal.
 //!
-//! The prompt is painted inline where the shell left the cursor. The
-//! hardware cursor is the caret: between frames it rests on the next
-//! expected cell, and it is hidden only while a frame is being written so it
-//! does not visibly jump. Every movement is relative to where the cursor
-//! was left, so the painter never needs to know where on the screen the
-//! prompt is: if the terminal scrolls, the cursor moves with the prompt.
+//! The prompt is painted inline where the shell left the cursor, with the
+//! header, when there is one, on the row above it. The hardware cursor is
+//! the caret: between frames it rests on the next expected cell, and it is
+//! hidden only while a frame is being written so it does not visibly jump.
+//! Every movement is relative to where the cursor was left, so the painter
+//! never needs to know where on the screen the prompt is: if the terminal
+//! scrolls, the cursor moves with the prompt.
 
 use crossterm::Command;
 use crossterm::cursor::{Hide, MoveDown, MoveToColumn, MoveUp, Show};
 use crossterm::style::{Attribute, Print, SetAttribute};
 use crossterm::terminal::{Clear, ClearType};
-use typ_rs_core::display::{Cell, Display, Foreground, Palette, Style};
+use typ_rs_core::display::{Cell, Display, Foreground, Header, Palette, Style};
 
 /// Foreground colors as the plain 16-color SGR codes, which every color
-/// terminal understands: bright black, bright red for mistakes, and the
-/// ordinary (darker) red for extras.
+/// terminal understands: bright black, bright red for mistakes and a slow
+/// live WPM, the ordinary (darker) red for extras, and bright green for a
+/// fast live WPM.
 const BRIGHT_BLACK: &str = "\x1b[90m";
 const RED: &str = "\x1b[91m";
 const DARK_RED: &str = "\x1b[31m";
+const GREEN: &str = "\x1b[92m";
 
 pub struct Painter {
     palette: Palette,
     previous: Option<Display>,
     buf: String,
-    /// Physical row of the hardware cursor relative to the prompt's first
-    /// row. Kept between frames: the next frame's movements start from it.
+    /// Physical row of the hardware cursor relative to the first painted
+    /// row, the header's when there is one. Kept between frames: the next
+    /// frame's movements start from it.
     row: usize,
-    /// The painted line and the column within it that the cursor was left
-    /// on by the last frame. Normally the line is also the row; they differ
-    /// only after the terminal has re-wrapped the painted lines.
+    /// The painted prompt line and the column within it that the cursor
+    /// was left on by the last frame. Normally the line is also the row
+    /// less the header's; they differ only after the terminal has
+    /// re-wrapped the painted lines.
     line: usize,
     column: usize,
     style: Style,
@@ -48,9 +53,11 @@ impl Painter {
         }
     }
 
-    /// Lines the last frame left on the screen.
+    /// Lines the last frame left on the screen, the header's included.
     pub fn painted_lines(&self) -> usize {
-        self.previous.as_ref().map_or(0, |d| d.lines().len())
+        self.previous
+            .as_ref()
+            .map_or(0, |d| header_rows(d) + d.lines().len())
     }
 
     /// Painted lines below the one the hardware cursor rests on. Meaningful
@@ -65,9 +72,10 @@ impl Painter {
     /// column of the last line once there is no caret, so that whatever is
     /// printed next follows the prompt. `repaint` forces every line to be
     /// rewritten, as after a resize; otherwise only cells that changed are
-    /// touched. A frame that needs more lines than the last one is always
-    /// written in full so that the terminal scrolls if the prompt is at the
-    /// bottom of the screen.
+    /// touched, and the header only when its text or style did. A frame
+    /// that needs more lines than the last one is always written in full so
+    /// that the terminal scrolls if the prompt is at the bottom of the
+    /// screen.
     ///
     /// Stale cells are always erased before a line is written, never after:
     /// a line that fills the terminal's width leaves the cursor pending on
@@ -76,17 +84,29 @@ impl Painter {
         self.buf.clear();
         self.emit(Hide);
         let lines = display.lines();
+        let offset = header_rows(display);
         let previous_lines = self.painted_lines();
 
-        if repaint || self.previous.is_none() || lines.len() > previous_lines {
-            self.paint_all(lines);
+        let same_shape = self
+            .previous
+            .as_ref()
+            .is_some_and(|p| header_rows(p) == offset);
+        if repaint || !same_shape || offset + lines.len() > previous_lines {
+            self.paint_all(display);
         } else {
             let previous = self.previous.take().expect("checked above");
-            for (i, line) in lines.iter().enumerate() {
-                self.paint_changes(i, &previous.lines()[i], line);
+            if let (Some(header), Some(shown)) = (display.header(), previous.header())
+                && (header.text() != shown.text()
+                    || header.style(self.palette) != shown.style(self.palette))
+            {
+                self.goto(0, 0);
+                self.paint_header(header, display.columns());
             }
-            if lines.len() < previous_lines {
-                self.goto(lines.len(), 0);
+            for (i, line) in lines.iter().enumerate() {
+                self.paint_changes(offset + i, &previous.lines()[i], line);
+            }
+            if offset + lines.len() < previous_lines {
+                self.goto(offset + lines.len(), 0);
                 self.emit(Clear(ClearType::FromCursorDown));
             }
         }
@@ -95,7 +115,7 @@ impl Painter {
             Some(caret) => (caret.line, caret.column),
             None => (lines.len().saturating_sub(1), 0),
         };
-        self.goto(line, column);
+        self.goto(offset + line, column);
         self.line = line;
         self.column = column;
         self.emit(Show);
@@ -105,36 +125,39 @@ impl Painter {
 
     /// The terminal is now `columns` wide. A terminal that re-wraps its
     /// lines when narrowed (kitty and most others) has just spread every
-    /// painted line wider than that over several rows and kept the cursor
-    /// on its cell, so the cursor is further from the prompt's first row
-    /// than the line it rests on says. This works out how far, so that the
-    /// repaint that must follow starts from the top. Widening changes
-    /// nothing: painted lines end in hard line breaks and are never joined.
-    /// A terminal that clips long lines instead of wrapping them leaves the
-    /// cursor where it was, and after narrowing this over-estimates.
+    /// painted line wider than that over several rows, the header's
+    /// included, and kept the cursor on its cell, so the cursor is further
+    /// from the first painted row than the line it rests on says. This
+    /// works out how far, so that the repaint that must follow starts from
+    /// the top. Widening changes nothing: painted lines end in hard line
+    /// breaks and are never joined. A terminal that clips long lines
+    /// instead of wrapping them leaves the cursor where it was, and after
+    /// narrowing this over-estimates.
     pub fn terminal_resized_to(&mut self, columns: usize) {
         let Some(previous) = &self.previous else {
             return;
         };
         let columns = columns.max(1);
-        let rows_of = |line: &[Cell]| {
-            line.iter()
-                .map(Cell::width)
-                .sum::<usize>()
-                .div_ceil(columns)
-                .max(1)
-        };
+        let rows_of_width = |width: usize| width.div_ceil(columns).max(1);
+        let rows_of = |line: &[Cell]| rows_of_width(line.iter().map(Cell::width).sum());
+        let header = previous.header().map_or(0, |h| {
+            rows_of_width(h.text().chars().count().min(previous.columns()))
+        });
         let above: usize = previous.lines()[..self.line]
             .iter()
             .map(|l| rows_of(l))
             .sum();
-        self.row = above + self.column / columns;
+        self.row = header + above + self.column / columns;
     }
 
-    fn paint_all(&mut self, lines: &[Vec<Cell>]) {
+    fn paint_all(&mut self, display: &Display) {
         self.goto(0, 0);
+        let lines = display.lines();
+        if let Some(header) = display.header() {
+            self.paint_header(header, display.columns());
+        }
         for (i, line) in lines.iter().enumerate() {
-            if i > 0 {
+            if i > 0 || display.header().is_some() {
                 self.buf.push_str("\r\n");
                 self.row += 1;
             }
@@ -146,6 +169,16 @@ impl Painter {
             self.emit(Clear(clear));
             self.paint_cells(line);
         }
+    }
+
+    /// Erases the header's row and writes the header's text in its style,
+    /// cut to `columns` so that it never wraps onto a second row.
+    fn paint_header(&mut self, header: Header, columns: usize) {
+        self.emit(Clear(ClearType::UntilNewLine));
+        self.set_style(header.style(self.palette));
+        let text: String = header.text().chars().take(columns).collect();
+        self.emit(Print(text));
+        self.set_style(Style::default());
     }
 
     /// Rewrites the span of one line between its first and last changed
@@ -190,6 +223,7 @@ impl Painter {
             Foreground::BrightBlack => self.buf.push_str(BRIGHT_BLACK),
             Foreground::Red => self.buf.push_str(RED),
             Foreground::DarkRed => self.buf.push_str(DARK_RED),
+            Foreground::Green => self.buf.push_str(GREEN),
         }
         let attributes = [
             (style.dim, Attribute::Dim),
@@ -227,10 +261,15 @@ fn to_u16(n: usize) -> u16 {
     u16::try_from(n).unwrap_or(u16::MAX)
 }
 
+/// Rows the display's header takes above the prompt.
+fn header_rows(display: &Display) -> usize {
+    usize::from(display.header().is_some())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use typ_rs_core::display::{Viewport, lay_out};
+    use typ_rs_core::display::{Tone, Viewport, lay_out};
     use typ_rs_core::prompt::Prompt;
     use typ_rs_core::session::{EndCondition, Input, Key, SessionState};
 
@@ -293,7 +332,7 @@ mod tests {
     #[test]
     fn the_first_frame_paints_every_line_and_leaves_the_cursor_on_the_caret() {
         let mut painter = Painter::new(Palette::Color);
-        let display = lay_out(&session("cat dog fox", ""), view(8, 10));
+        let display = lay_out(&session("cat dog fox", ""), view(8, 10), None);
 
         let frame = lossy(painter.frame(&display, false));
 
@@ -311,7 +350,7 @@ mod tests {
     fn each_line_is_erased_before_it_is_written_never_after_its_last_cell() {
         let mut painter = Painter::new(Palette::Color);
         // "cat dog " fills all eight columns.
-        let display = lay_out(&session("cat dog fox", ""), view(8, 10));
+        let display = lay_out(&session("cat dog fox", ""), view(8, 10), None);
 
         let frame = lossy(painter.frame(&display, false));
 
@@ -332,10 +371,15 @@ mod tests {
     #[test]
     fn typing_one_character_rewrites_only_that_cell_and_moves_the_cursor_on() {
         let mut painter = Painter::new(Palette::Color);
-        painter.frame(&lay_out(&session("cat dog fox", ""), view(8, 10)), false);
+        painter.frame(
+            &lay_out(&session("cat dog fox", ""), view(8, 10), None),
+            false,
+        );
 
-        let frame =
-            lossy(painter.frame(&lay_out(&session("cat dog fox", "c"), view(8, 10)), false));
+        let frame = lossy(painter.frame(
+            &lay_out(&session("cat dog fox", "c"), view(8, 10), None),
+            false,
+        ));
 
         assert_eq!(text_of(&frame), "c");
         assert!(!frame.contains("\r\n"));
@@ -350,13 +394,13 @@ mod tests {
     fn a_change_on_a_later_line_moves_down_to_it_and_the_cursor_stays_there() {
         let mut painter = Painter::new(Palette::Color);
         painter.frame(
-            &lay_out(&session("cat dog fox", "cat dog "), view(8, 10)),
+            &lay_out(&session("cat dog fox", "cat dog "), view(8, 10), None),
             false,
         );
         assert_eq!(painter.rows_below_cursor(), 0);
 
         let frame = lossy(painter.frame(
-            &lay_out(&session("cat dog fox", "cat dog f"), view(8, 10)),
+            &lay_out(&session("cat dog fox", "cat dog f"), view(8, 10), None),
             false,
         ));
 
@@ -373,12 +417,12 @@ mod tests {
     fn the_cursor_moves_down_when_the_caret_crosses_to_the_next_line() {
         let mut painter = Painter::new(Palette::Color);
         painter.frame(
-            &lay_out(&session("cat dog fox", "cat dog"), view(8, 10)),
+            &lay_out(&session("cat dog fox", "cat dog"), view(8, 10), None),
             false,
         );
 
         let frame = lossy(painter.frame(
-            &lay_out(&session("cat dog fox", "cat dog "), view(8, 10)),
+            &lay_out(&session("cat dog fox", "cat dog "), view(8, 10), None),
             false,
         ));
 
@@ -395,12 +439,12 @@ mod tests {
     fn backspacing_into_the_previous_line_moves_the_cursor_back_up() {
         let mut painter = Painter::new(Palette::Color);
         painter.frame(
-            &lay_out(&session("cat dog fox", "cat dxg "), view(8, 10)),
+            &lay_out(&session("cat dog fox", "cat dxg "), view(8, 10), None),
             false,
         );
 
         let frame = lossy(painter.frame(
-            &lay_out(&session("cat dog fox", "cat dxg ⌫"), view(8, 10)),
+            &lay_out(&session("cat dog fox", "cat dxg ⌫"), view(8, 10), None),
             false,
         ));
 
@@ -415,10 +459,15 @@ mod tests {
     #[test]
     fn an_extra_that_lengthens_a_line_erases_its_tail_then_repaints_it() {
         let mut painter = Painter::new(Palette::Color);
-        painter.frame(&lay_out(&session("cat dog", "cat"), view(20, 10)), false);
+        painter.frame(
+            &lay_out(&session("cat dog", "cat"), view(20, 10), None),
+            false,
+        );
 
-        let frame =
-            lossy(painter.frame(&lay_out(&session("cat dog", "catx"), view(20, 10)), false));
+        let frame = lossy(painter.frame(
+            &lay_out(&session("cat dog", "catx"), view(20, 10), None),
+            false,
+        ));
 
         // The extra, the following space, and the pushed word.
         assert_eq!(text_of(&frame), "x dog ");
@@ -433,10 +482,16 @@ mod tests {
     #[test]
     fn a_frame_that_needs_more_lines_is_written_in_full_so_the_terminal_can_scroll() {
         let mut painter = Painter::new(Palette::Color);
-        painter.frame(&lay_out(&session("cat dog", "cat"), view(8, 10)), false);
+        painter.frame(
+            &lay_out(&session("cat dog", "cat"), view(8, 10), None),
+            false,
+        );
 
         // Extras push "dog" onto a second line.
-        let frame = lossy(painter.frame(&lay_out(&session("cat dog", "catx"), view(8, 10)), false));
+        let frame = lossy(painter.frame(
+            &lay_out(&session("cat dog", "catx"), view(8, 10), None),
+            false,
+        ));
 
         assert_eq!(text_of(&frame), "catx \r\ndog ");
         assert!(frame.contains(&format!("\r\n{CLEAR_BELOW}")), "{frame:?}");
@@ -449,9 +504,15 @@ mod tests {
     #[test]
     fn a_frame_with_fewer_lines_clears_the_lines_that_vanished() {
         let mut painter = Painter::new(Palette::Color);
-        painter.frame(&lay_out(&session("cat dog", "catx"), view(8, 10)), false);
+        painter.frame(
+            &lay_out(&session("cat dog", "catx"), view(8, 10), None),
+            false,
+        );
 
-        let frame = lossy(painter.frame(&lay_out(&session("cat dog", "cat"), view(8, 10)), false));
+        let frame = lossy(painter.frame(
+            &lay_out(&session("cat dog", "cat"), view(8, 10), None),
+            false,
+        ));
 
         assert!(
             frame.contains(&format!("{MOVE_DOWN_1}{COLUMN_0}{CLEAR_BELOW}")),
@@ -467,7 +528,7 @@ mod tests {
     #[test]
     fn an_unchanged_display_only_hides_and_shows_the_cursor_where_it_is() {
         let mut painter = Painter::new(Palette::Color);
-        let display = lay_out(&session("cat dog", "ca"), view(20, 10));
+        let display = lay_out(&session("cat dog", "ca"), view(20, 10), None);
         painter.frame(&display, false);
 
         assert_eq!(
@@ -480,10 +541,10 @@ mod tests {
     fn a_forced_repaint_rewrites_everything_from_the_top() {
         let mut painter = Painter::new(Palette::Color);
         let state = session("cat dog fox", "cat dog f");
-        painter.frame(&lay_out(&state, view(8, 10)), false);
+        painter.frame(&lay_out(&state, view(8, 10), None), false);
         assert_eq!(painter.rows_below_cursor(), 0);
 
-        let frame = lossy(painter.frame(&lay_out(&state, view(20, 10)), true));
+        let frame = lossy(painter.frame(&lay_out(&state, view(20, 10), None), true));
 
         assert!(
             frame.starts_with(&format!("{HIDE}{MOVE_UP_1}{COLUMN_0}")),
@@ -501,12 +562,12 @@ mod tests {
         let mut painter = Painter::new(Palette::Color);
         let state = session("cat dog fox", "cat dog f");
         // "cat dog " / "fox ", cursor on the second line at column 1.
-        painter.frame(&lay_out(&state, view(8, 10)), false);
+        painter.frame(&lay_out(&state, view(8, 10), None), false);
 
         // At five columns "cat dog " wraps onto two rows, so the cursor is
         // now two rows below the top.
         painter.terminal_resized_to(5);
-        let frame = lossy(painter.frame(&lay_out(&state, view(5, 10)), true));
+        let frame = lossy(painter.frame(&lay_out(&state, view(5, 10), None), true));
 
         assert!(
             frame.starts_with(&format!("{HIDE}\x1b[2A{COLUMN_0}")),
@@ -525,12 +586,12 @@ mod tests {
         let mut painter = Painter::new(Palette::Color);
         let state = session("cat dog fox", "cat dog");
         // One line, "cat dog fox ", cursor at column 7.
-        painter.frame(&lay_out(&state, view(20, 10)), false);
+        painter.frame(&lay_out(&state, view(20, 10), None), false);
 
         // At five columns the line spans three rows and the cursor, at
         // column 7, sits on the second.
         painter.terminal_resized_to(5);
-        let frame = lossy(painter.frame(&lay_out(&state, view(5, 10)), true));
+        let frame = lossy(painter.frame(&lay_out(&state, view(5, 10), None), true));
 
         assert!(
             frame.starts_with(&format!("{HIDE}{MOVE_UP_1}{COLUMN_0}")),
@@ -542,10 +603,10 @@ mod tests {
     fn widening_changes_nothing_about_where_the_cursor_is() {
         let mut painter = Painter::new(Palette::Color);
         let state = session("cat dog fox", "cat dog f");
-        painter.frame(&lay_out(&state, view(8, 10)), false);
+        painter.frame(&lay_out(&state, view(8, 10), None), false);
 
         painter.terminal_resized_to(20);
-        let frame = lossy(painter.frame(&lay_out(&state, view(20, 10)), true));
+        let frame = lossy(painter.frame(&lay_out(&state, view(20, 10), None), true));
 
         assert!(
             frame.starts_with(&format!("{HIDE}{MOVE_UP_1}{COLUMN_0}")),
@@ -558,12 +619,12 @@ mod tests {
     fn once_the_session_is_over_the_cursor_rests_at_the_start_of_the_last_line() {
         let mut painter = Painter::new(Palette::Color);
         painter.frame(
-            &lay_out(&session("cat dog fox", "cat dog fo"), view(8, 10)),
+            &lay_out(&session("cat dog fox", "cat dog fo"), view(8, 10), None),
             false,
         );
 
         let frame = lossy(painter.frame(
-            &lay_out(&session("cat dog fox", "cat dog fox"), view(8, 10)),
+            &lay_out(&session("cat dog fox", "cat dog fox"), view(8, 10), None),
             false,
         ));
 
@@ -574,7 +635,7 @@ mod tests {
     #[test]
     fn colors_follow_the_palette() {
         let state = session("cat", "cxtq");
-        let display = lay_out(&state, view(20, 10));
+        let display = lay_out(&state, view(20, 10), None);
 
         let color = lossy(Painter::new(Palette::Color).frame(&display, false));
         assert!(color.contains(BRIGHT_BLACK), "bright black: {color:?}");
@@ -595,16 +656,225 @@ mod tests {
     #[test]
     fn a_word_submitted_with_an_error_is_underlined_when_it_is_submitted() {
         let mut painter = Painter::new(Palette::Color);
-        let before =
-            lossy(painter.frame(&lay_out(&session("cat dog", "cxt"), view(20, 10)), false));
+        let before = lossy(painter.frame(
+            &lay_out(&session("cat dog", "cxt"), view(20, 10), None),
+            false,
+        ));
         assert!(!before.contains(UNDERLINE), "{before:?}");
 
-        let frame =
-            lossy(painter.frame(&lay_out(&session("cat dog", "cxt "), view(20, 10)), false));
+        let frame = lossy(painter.frame(
+            &lay_out(&session("cat dog", "cxt "), view(20, 10), None),
+            false,
+        ));
 
         // The whole word is repainted underlined; its space is not.
         assert_eq!(text_of(&frame), "cat ");
         let underlined = frame.find(UNDERLINE).expect("underlines the word");
         assert!(text_of(&frame[..underlined]).is_empty(), "{frame:?}");
+    }
+
+    fn header_with(wpm: Option<u32>, seconds: u64, tone: Tone) -> Header {
+        Header {
+            wpm,
+            elapsed_micros: seconds * 1_000_000,
+            tone,
+        }
+    }
+
+    fn placeholder() -> Header {
+        header_with(None, 0, Tone::Placeholder)
+    }
+
+    #[test]
+    fn a_header_is_painted_on_the_row_above_the_prompt_and_the_caret_sits_below_it() {
+        let mut painter = Painter::new(Palette::Color);
+        let display = lay_out(
+            &session("the quick brown fox", ""),
+            view(12, 10),
+            Some(placeholder()),
+        );
+
+        let frame = lossy(painter.frame(&display, false));
+
+        assert_eq!(text_of(&frame), "— wpm   0:00\r\nthe quick \r\nbrown fox ");
+        assert!(
+            frame.starts_with(&format!("{HIDE}{COLUMN_0}{CLEAR_TO_END_OF_LINE}")),
+            "{frame:?}"
+        );
+        assert!(
+            frame.ends_with(&format!("{MOVE_UP_1}{COLUMN_0}{SHOW}")),
+            "{frame:?}"
+        );
+        assert_eq!(painter.painted_lines(), 3);
+        assert_eq!(painter.rows_below_cursor(), 1);
+    }
+
+    #[test]
+    fn the_caret_rows_are_offset_by_the_header() {
+        let mut painter = Painter::new(Palette::Color);
+        painter.frame(
+            &lay_out(
+                &session("cat dog fox", "cat dog"),
+                view(8, 10),
+                Some(placeholder()),
+            ),
+            false,
+        );
+        assert_eq!(painter.rows_below_cursor(), 1);
+
+        let frame = lossy(painter.frame(
+            &lay_out(
+                &session("cat dog fox", "cat dog "),
+                view(8, 10),
+                Some(placeholder()),
+            ),
+            false,
+        ));
+
+        assert_eq!(text_of(&frame), " ");
+        assert!(
+            frame.ends_with(&format!("{MOVE_DOWN_1}{COLUMN_0}{SHOW}")),
+            "{frame:?}"
+        );
+        assert_eq!(painter.rows_below_cursor(), 0);
+    }
+
+    #[test]
+    fn the_header_is_rewritten_only_when_its_text_or_style_changes() {
+        let mut painter = Painter::new(Palette::Color);
+        let state = session("cat dog", "");
+        let shown = header_with(Some(42), 1, Tone::Neutral);
+        painter.frame(&lay_out(&state, view(20, 10), Some(shown)), false);
+
+        // A keystroke between ticks: the same header, one cell of prompt.
+        let typed = session("cat dog", "c");
+        let frame = lossy(painter.frame(&lay_out(&typed, view(20, 10), Some(shown)), false));
+        assert_eq!(text_of(&frame), "c");
+        assert!(!frame.contains(MOVE_UP_1), "{frame:?}");
+
+        // A tick: the header alone, written whole, and the cursor back on
+        // the caret.
+        let ticked = header_with(Some(41), 2, Tone::Neutral);
+        let frame = lossy(painter.frame(&lay_out(&typed, view(20, 10), Some(ticked)), false));
+        assert_eq!(text_of(&frame), "41 wpm   0:02");
+        assert!(
+            frame.starts_with(&format!(
+                "{HIDE}{MOVE_UP_1}{COLUMN_0}{CLEAR_TO_END_OF_LINE}"
+            )),
+            "{frame:?}"
+        );
+        assert!(
+            frame.ends_with(&format!("{MOVE_DOWN_1}{}{SHOW}", column(1))),
+            "{frame:?}"
+        );
+
+        // The same text in another tone is a change too.
+        let faster = header_with(Some(41), 2, Tone::Faster);
+        let frame = lossy(painter.frame(&lay_out(&typed, view(20, 10), Some(faster)), false));
+        assert_eq!(text_of(&frame), "41 wpm   0:02");
+        assert!(frame.contains(GREEN), "{frame:?}");
+
+        // Nothing changed: only the cursor is hidden and shown.
+        let frame = lossy(painter.frame(&lay_out(&typed, view(20, 10), Some(faster)), false));
+        assert_eq!(frame, format!("{HIDE}{}{SHOW}", column(1)));
+    }
+
+    #[test]
+    fn header_colors_follow_the_palette() {
+        let state = session("cat dog", "");
+        let header_bytes = |tone: Tone, palette: Palette| {
+            let header = header_with(Some(50), 3, tone);
+            let frame = lossy(
+                Painter::new(palette).frame(&lay_out(&state, view(20, 10), Some(header)), false),
+            );
+            let end = frame.find("\r\n").expect("a prompt line follows");
+            frame[..end].to_string()
+        };
+
+        assert!(header_bytes(Tone::Placeholder, Palette::Color).contains(BRIGHT_BLACK));
+        assert!(header_bytes(Tone::Muted, Palette::Color).contains(BRIGHT_BLACK));
+        assert!(header_bytes(Tone::Faster, Palette::Color).contains(GREEN));
+        assert!(header_bytes(Tone::Slower, Palette::Color).contains(RED));
+        let neutral = header_bytes(Tone::Neutral, Palette::Color);
+        for code in [BRIGHT_BLACK, GREEN, RED, DARK_RED] {
+            assert!(!neutral.contains(code), "{neutral:?}");
+        }
+
+        assert!(header_bytes(Tone::Placeholder, Palette::NoColor).contains("\x1b[2m"));
+        for tone in [Tone::Faster, Tone::Slower, Tone::Neutral] {
+            let plain = header_bytes(tone, Palette::NoColor);
+            for code in [BRIGHT_BLACK, GREEN, RED, "\x1b[1m", UNDERLINE, "\x1b[2m"] {
+                assert!(!plain.contains(code), "{tone:?}: {plain:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn the_header_is_truncated_to_the_terminal_width_never_wrapped() {
+        let mut painter = Painter::new(Palette::Color);
+        let display = lay_out(&session("cat dog", ""), view(6, 10), Some(placeholder()));
+
+        let frame = lossy(painter.frame(&display, false));
+
+        assert_eq!(text_of(&frame), "— wpm \r\ncat \r\ndog ");
+        assert_eq!(painter.painted_lines(), 3);
+    }
+
+    #[test]
+    fn a_full_repaint_after_a_narrowing_starts_above_the_re_wrapped_header() {
+        let mut painter = Painter::new(Palette::Color);
+        let state = session("the big red fox", "the big red f");
+        // Header, "the big red " / "fox ", cursor on the second prompt line.
+        painter.frame(&lay_out(&state, view(12, 10), Some(placeholder())), false);
+        assert_eq!(painter.rows_below_cursor(), 0);
+
+        // At five columns the twelve-character header and the twelve-
+        // character first line each spread over three rows, so the cursor
+        // is six rows down.
+        painter.terminal_resized_to(5);
+        let frame = lossy(painter.frame(&lay_out(&state, view(5, 10), Some(placeholder())), true));
+
+        assert!(
+            frame.starts_with(&format!("{HIDE}\x1b[6A{COLUMN_0}")),
+            "{frame:?}"
+        );
+        assert_eq!(text_of(&frame), "— wpm\r\nthe \r\nbig \r\nred \r\nfox ");
+        assert!(
+            frame.ends_with(&format!("{}{SHOW}", column(1))),
+            "{frame:?}"
+        );
+        assert_eq!(painter.painted_lines(), 5);
+        assert_eq!(painter.rows_below_cursor(), 0);
+    }
+
+    #[test]
+    fn once_the_session_is_over_the_frozen_header_stays_and_the_cursor_rests_below_the_prompt() {
+        let mut painter = Painter::new(Palette::Color);
+        let live = header_with(Some(60), 2, Tone::Neutral);
+        painter.frame(
+            &lay_out(
+                &session("the quick brown fox", "the quick brown fo"),
+                view(13, 10),
+                Some(live),
+            ),
+            false,
+        );
+
+        let frozen = header_with(Some(58), 2, Tone::Faster);
+        let frame = lossy(painter.frame(
+            &lay_out(
+                &session("the quick brown fox", "the quick brown fox"),
+                view(13, 10),
+                Some(frozen),
+            ),
+            false,
+        ));
+
+        // The header is rewritten whole; the final character and the space
+        // after it take their completed colors.
+        assert_eq!(text_of(&frame), "58 wpm   0:02x ");
+        assert!(frame.ends_with(&format!("{COLUMN_0}{SHOW}")), "{frame:?}");
+        assert_eq!(painter.painted_lines(), 3);
+        assert_eq!(painter.rows_below_cursor(), 0);
     }
 }

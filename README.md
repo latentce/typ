@@ -5,6 +5,7 @@ slow you down or trip you up, and builds each practice prompt around them.
 
 ```
 $ typ
+68 wpm   0:42
 the quick brown fox jumps over the lazy dog ...
 
 68 wpm  96.2% accuracy  99.4% after corrections  71% consistency
@@ -50,6 +51,18 @@ a word left wrong is underlined. Backspace fixes mistakes, and steps back
 into the previous word only if that word was left wrong. `Shift-Tab` throws
 the prompt away and shows a fresh one in its place, as often as you like.
 `Ctrl-C` or `Esc` ends early.
+
+Above the prompt sits a one-line header: `— wpm   0:00` until your first
+keystroke, then your speed and the time elapsed, `42 wpm   0:37`, both
+changing once a second from your first character. The speed is gross WPM
+(every character you typed, extras and the spaces between words included,
+over five, per minute), the same figure the results lead with, measured to
+the present moment rather than to your last keystroke, so a pause pulls it
+down. It is green when you are running more than 5% faster than your recent
+average, red when more than 5% slower, and in your terminal's own color
+otherwise, or until you have a completed session to compare with. When you
+finish, the header freezes at the figures the results print beneath it; if
+you end early, it dims.
 
 When you finish, three lines print:
 

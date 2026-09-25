@@ -40,7 +40,7 @@ database, and lets the simulator reuse them without re-implementing anything.
 | `compose` | Word selection, probes, contamination, arrangement. |
 | `metrics` | Session summaries, recent series, probe trends, transfer. |
 | `layout` | Key geometry per layout (finger, hand, row, position). |
-| `display` | Wraps a session into styled cells and a caret position; the color palette and `NO_COLOR` handling; the cursor shapes. |
+| `display` | Wraps a session into styled cells and a caret position; the live WPM header shown above the prompt; the color palette and `NO_COLOR` handling; the cursor shapes. |
 | `random` | A seeded ChaCha PRNG so every draw is reproducible. |
 
 ## A run of `typ`
@@ -176,9 +176,9 @@ interpretable.
 | --- | --- |
 | `main.rs` | Argument parsing, the subcommands, the start and end of a session. |
 | `terminal.rs` | Raw mode guard. Sets the cursor shape; restores the terminal, cursor included, on every exit path, panics included. |
-| `input.rs` | Decodes terminal events into input events; flags bursts, pastes, resizes. |
-| `render.rs` | Paints the prompt; repaints only changed cells; re-wraps on resize; rests the hardware cursor on the caret. |
-| `interactive.rs` | The loop that ties input, state machine, and rendering together. |
+| `input.rs` | Decodes terminal events into input events; flags bursts, pastes, resizes; waits for input only until the header's next tick. |
+| `render.rs` | Paints the header and the prompt; repaints only changed cells and a changed header; re-wraps on resize; rests the hardware cursor on the caret. |
+| `interactive.rs` | The loop that ties input, state machine, and rendering together, and ticks the header once a second. |
 | `report.rs` | The text of every report: results, `stats`, `inspect`, `replay`. |
 
 The painter's output is unit tested against the exact escape sequences it

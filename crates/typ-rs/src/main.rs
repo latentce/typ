@@ -186,12 +186,14 @@ fn session(words: Option<&str>, profile: Option<&str>) -> Result<(), Box<dyn Err
     let end = EndCondition::AfterWords(started.prompt.word_count());
     let palette = Palette::from_no_color(std::env::var("NO_COLOR").ok().as_deref());
     let cursor = store.cursor()?;
+    let recent_wpm = store.recent_series(&profile)?.and_then(|r| r.wpm);
 
     let run = interactive::run(
         started.prompt.clone(),
         end,
         palette,
         cursor,
+        recent_wpm,
         || -> Result<Prompt, Box<dyn Error>> {
             let restarted_at = unix_now();
             let composed = compose_now(restarted_at, getrandom::u64()?);

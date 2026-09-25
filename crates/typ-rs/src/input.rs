@@ -35,10 +35,23 @@ pub struct StampedEvent {
 }
 
 /// Blocks until at least one event is available, then drains everything
-/// already pending, stamping each on read. Never returns an empty batch.
-pub fn read_batch(now_micros: impl Fn() -> u64) -> io::Result<Vec<StampedEvent>> {
+/// already pending, stamping each on read. With a deadline, on the same
+/// clock `now_micros` reads, the wait is bounded: when the deadline passes
+/// with nothing to read, the batch is empty. Input that arrives before the
+/// deadline is drained and returned as usual, so a batch is empty only on
+/// a timeout, and never without a deadline.
+pub fn read_batch(
+    deadline_micros: Option<u64>,
+    now_micros: impl Fn() -> u64,
+) -> io::Result<Vec<StampedEvent>> {
     let mut batch = Vec::new();
     loop {
+        if let Some(deadline) = deadline_micros {
+            let wait = Duration::from_micros(deadline.saturating_sub(now_micros()));
+            if !event::poll(wait)? {
+                return Ok(batch);
+            }
+        }
         let raw = event::read()?;
         let at_micros = now_micros();
         if let Some(event) = decode(raw) {
